@@ -51,6 +51,35 @@ def _remote_command(master_fd: int, command: str) -> None:
     _write(master_fd, command.encode("utf-8") + b"\r")
 
 
+def _resync_remote_shell(master_fd: int, terminal_fd: int) -> None:
+    """Drop late ZMODEM trailer bytes and redraw the remote shell prompt."""
+    time.sleep(0.15)
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([master_fd], [], [], 0.05)
+        if master_fd not in readable:
+            continue
+        try:
+            os.read(master_fd, 65536)
+        except OSError:
+            break
+
+    # rz/sz normally returns to the shell, but the prompt can remain on the
+    # same input line. An empty command gives the user a clean, visible PS1.
+    _write(master_fd, b"\r")
+    deadline = time.monotonic() + 0.8
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([master_fd], [], [], 0.05)
+        if master_fd not in readable:
+            continue
+        try:
+            data = os.read(master_fd, 65536)
+        except OSError:
+            break
+        if data:
+            _write(terminal_fd, data)
+
+
 def _run_transfer_process(
     command: list[str],
     master_fd: int,
@@ -137,6 +166,7 @@ def _run_zmodem(master_fd: int, terminal_fd: int, cooked_attrs: list, *, upload:
         _remote_command(master_fd, command)
         time.sleep(0.2)
         ok = _run_transfer_process(["rz", "-be"], master_fd, terminal_fd, cwd=str(destination_path))
+    _resync_remote_shell(master_fd, terminal_fd)
     if ok:
         print("ZMODEM transfer finished.\n", file=sys.stderr)
     else:
