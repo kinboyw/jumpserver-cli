@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
+  <title id="title">jumpserver-cli TUI preview</title>
+  <desc id="desc">A dark terminal interface showing an asset tree, asset details, and recent sessions.</desc>
+  <rect width="1440" height="820" fill="#0a0e14"/>
+  <rect x="0" y="0" width="1440" height="46" fill="#010409"/>
+  <rect x="0" y="774" width="1440" height="46" fill="#010409"/>
+  <text x="24" y="30" fill="#58a6ff" font-family="monospace" font-size="20" font-weight="700">JUMPCLI</text>
+  <text x="150" y="30" fill="#6e7681" font-family="monospace" font-size="20">/</text>
+  <text x="174" y="30" fill="#3fb950" font-family="monospace" font-size="20" font-weight="700">ASSET CONSOLE</text>
+  <text x="1100" y="30" fill="#8b949e" font-family="monospace" font-size="16">JumpServer  |  auth: aksk</text>
+
+  <rect x="24" y="64" width="812" height="686" fill="none" stroke="#30363d" stroke-width="2"/>
+  <text x="44" y="96" fill="#58a6ff" font-family="monospace" font-size="19" font-weight="700">ASSET TREE</text>
+  <text x="44" y="130" fill="#8b949e" font-family="monospace" font-size="16">FILTER   ott 192.0.2</text>
+  <line x1="44" y1="148" x2="816" y2="148" stroke="#30363d"/>
+  <rect x="44" y="166" width="772" height="43" rx="3" fill="#1f6feb"/>
+  <text x="62" y="194" fill="#ffffff" font-family="monospace" font-size="17" font-weight="700">&gt; +-- 192.0.2.10     ott-api-01                       Linux   ssh</text>
+  <text x="62" y="238" fill="#c9d1d9" font-family="monospace" font-size="17">  +-- 192.0.2.11     ott-api-02                       Linux   ssh</text>
+  <text x="62" y="282" fill="#c9d1d9" font-family="monospace" font-size="17">  +-- 192.0.2.20     ott-worker-01                    Linux   ssh</text>
+  <text x="62" y="326" fill="#8b949e" font-family="monospace" font-size="17">  3 matches</text>
+  <text x="44" y="704" fill="#6e7681" font-family="monospace" font-size="15">Type to filter  |  Up/Down navigate  |  Enter connect</text>
+
+  <rect x="858" y="64" width="558" height="280" fill="none" stroke="#30363d" stroke-width="2"/>
+  <text x="878" y="96" fill="#8b949e" font-family="monospace" font-size="19" font-weight="700">DETAILS</text>
+  <text x="878" y="142" fill="#8b949e" font-family="monospace" font-size="16">Address </text>
+  <text x="1018" y="142" fill="#f0f6fc" font-family="monospace" font-size="16">192.0.2.10</text>
+  <text x="878" y="178" fill="#8b949e" font-family="monospace" font-size="16">Host    </text>
+  <text x="1018" y="178" fill="#f0f6fc" font-family="monospace" font-size="16">ott-api-01</text>
+  <text x="878" y="214" fill="#8b949e" font-family="monospace" font-size="16">Platform</text>
+  <text x="1018" y="214" fill="#f0f6fc" font-family="monospace" font-size="16">Linux</text>
+  <text x="878" y="250" fill="#8b949e" font-family="monospace" font-size="16">Proto   </text>
+  <text x="1018" y="250" fill="#f0f6fc" font-family="monospace" font-size="16">ssh</text>
+  <text x="878" y="302" fill="#8b949e" font-family="monospace" font-size="15">Enter: choose system user</text>
+
+  <rect x="858" y="364" width="558" height="386" fill="none" stroke="#30363d" stroke-width="2"/>
+  <text x="878" y="396" fill="#58a6ff" font-family="monospace" font-size="19" font-weight="700">RECENT SESSIONS  [heat, newest]</text>
+  <text x="878" y="444" fill="#ffffff" font-family="monospace" font-size="16">&gt; 192.0.2.10      ott-api-01             x12  08-26 20:39</text>
+  <text x="878" y="482" fill="#c9d1d9" font-family="monospace" font-size="16">  192.0.2.20      ott-worker-01          x7   08-26 18:12</text>
+  <text x="878" y="520" fill="#c9d1d9" font-family="monospace" font-size="16">  192.0.2.11      ott-api-02             x3   08-25 11:04</text>
+  <text x="878" y="704" fill="#6e7681" font-family="monospace" font-size="15">History stores labels and timestamps only</text>
+
+  <text x="24" y="802" fill="#6e7681" font-family="monospace" font-size="15">Tab focus   Enter connect   r reload   q quit</text>
+</svg>

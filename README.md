@@ -16,6 +16,10 @@
 - 临时 SSH Token 本地缓存，减少重复请求。
 - 保留脚本化 CLI 参数接口，适合自动化和高级用法。
 
+TUI 预览：
+
+![jumpserver-cli TUI preview](docs/tui-preview.svg)
+
 ## 快速开始
 
 ### 1. 获取代码
@@ -113,6 +117,79 @@ ott 10.22
 | `Ctrl-C` | 退出 TUI |
 
 鼠标可以点击资源、系统用户和历史会话，也支持滚轮移动列表。
+
+## 基础功能演示
+
+### 首次配置
+
+交互式终端中无需预先创建配置文件：
+
+```console
+$ ./jump_cli.py
+JumpServer URL: https://jumpserver.example.com
+Step 2/2: choose an authentication method.
+1. AK/SK (recommended)
+2. Browser cookie JSON
+Choose auth method [1]: 1
+AccessKeyID: your-access-key-id
+AccessKeySecret: ********
+Org ID [default]:
+```
+
+地址和认证信息验证成功后会进入 TUI。后续启动仍然只需要：
+
+```bash
+./jump_cli.py
+```
+
+### 多条件检索并连接
+
+资源列表获得焦点时直接输入条件，不需要先按 `/`。条件用空格分隔，按 AND 逻辑实时过滤：
+
+```text
+ott 192.0.2
+```
+
+筛选完成后按 `Enter`，选择系统用户，再按 `Enter` 启动 SSH。只有一个可用的 `ops` 系统用户时会直接连接。
+
+### 解析资源
+
+需要在脚本中确认资源和系统用户时，可以使用 JSON 输出：
+
+```console
+$ ./jump_cli.py resolve 192.0.2.10 --system-user ops
+{
+  "asset": {
+    "hostname": "server.example.com",
+    "ip": "192.0.2.10",
+    "protocols": ["ssh"]
+  },
+  "system_user": {
+    "username": "ops"
+  }
+}
+```
+
+### SSH 和远程命令
+
+```bash
+# 交互式 SSH
+./jssh 192.0.2.10
+
+# 通过 PTY 执行命令
+./jexec 192.0.2.10 -- 'hostname && uptime'
+```
+
+客户端会为连接申请短时 Token，并按资源和系统用户缓存。TUI 中获取 Token 的过程不会打印诊断信息；需要排查问题时可以使用普通 CLI 命令查看错误。
+
+### 查看状态和配置
+
+```bash
+./jump_cli.py status
+./jump_cli.py config show
+```
+
+这两个命令不会打印 Secret、Cookie 或临时 Token。
 
 ## CLI 用法
 
