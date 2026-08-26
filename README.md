@@ -39,53 +39,54 @@ python3 jump_cli.py --help
 
 建立 SSH 会话还需要系统已安装 `ssh` 和 `sshpass`。
 
-### 2. 配置 JumpServer 地址
+### 2. 首次启动
 
-首次启动 TUI 会引导输入地址。也可以提前保存地址：
-
-```bash
-./jump_cli.py config set --base-url 'https://jumpserver.example.com'
-```
-
-配置文件默认保存于 `~/.config/jumpserver-cli/config.json`，只包含地址和组织 ID。
-也可以临时使用环境变量：
-
-```bash
-export JMS_BASE_URL='https://jumpserver.example.com'
-```
-
-地址优先级为：命令行 `--base-url` > `JMS_BASE_URL` > 配置文件。
-
-### 3. 配置认证
-
-推荐使用 Access Key / Secret：
-
-```bash
-./jump_cli.py login-aksk --key-id 'your-access-key-id'
-```
-
-命令会隐藏输入 Secret。凭据默认保存在 `~/.cache/jumpserver-cli/credentials.json`，权限为当前用户可读写。
-
-也可以只在当前 shell 中提供凭据：
-
-```bash
-export JMS_ACCESS_KEY_ID='your-access-key-id'
-export JMS_ACCESS_KEY_SECRET='your-access-key-secret'
-```
-
-完成认证后检查状态：
-
-```bash
-./jump_cli.py status
-```
-
-### 4. 启动 TUI
+直接运行即可开始首次配置：
 
 ```bash
 ./jump_cli.py
 ```
 
-也可以显式启动：
+CLI 会按顺序引导你完成：
+
+1. 输入 JumpServer 根地址。
+2. 选择认证方式：Access Key / Secret 或浏览器 Cookie。
+3. 输入认证信息并验证连接。
+
+配置成功后，地址会保存到 `~/.config/jumpserver-cli/config.json`，认证信息会保存到本机缓存目录。之后再次运行 `./jump_cli.py` 会直接进入 TUI，不需要重复配置。
+
+推荐使用 Access Key / Secret。也可以在首次启动前手动配置，适用于脚本或非交互终端：
+
+```bash
+./jump_cli.py config set --base-url 'https://jumpserver.example.com'
+./jump_cli.py login-aksk --key-id 'your-access-key-id'
+```
+
+命令会隐藏输入 Secret。也可以只在当前 shell 中提供认证信息：
+
+```bash
+export JMS_BASE_URL='https://jumpserver.example.com'
+export JMS_ACCESS_KEY_ID='your-access-key-id'
+export JMS_ACCESS_KEY_SECRET='your-access-key-secret'
+```
+
+查看当前认证状态：
+
+```bash
+./jump_cli.py status
+```
+
+配置优先级为：命令行 `--base-url` > `JMS_BASE_URL` > 配置文件。
+
+### 3. 启动 TUI
+
+首次启动和后续启动都使用同一个命令：
+
+```bash
+./jump_cli.py
+```
+
+也可以显式使用：
 
 ```bash
 ./jump_cli.py tui
