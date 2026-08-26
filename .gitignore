@@ -1,0 +1,20 @@
+.venv/
+.uv-cache/
+.test-cache/
+__pycache__/
+*.py[cod]
+
+# Local authentication and temporary token material.
+.env
+cookies.txt
+session.json
+credentials.json
+tokens.json
+token-meta.json
+
+# Local test and build output.
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

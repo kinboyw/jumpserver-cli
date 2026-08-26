@@ -1,0 +1,12 @@
+[project]
+name = "jumpserver-cli"
+version = "0.1.0"
+description = "A local CLI for accessing servers through JumpServer."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3,<4",
+]
+
+[tool.uv]
+package = false
