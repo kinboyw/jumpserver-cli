@@ -106,12 +106,20 @@ class EmbeddedPtySession:
         with self._lock:
             process = self.transfer_process
             master_fd = self.master_fd
-            if process is None:
+            if process is None and self.transfer_direction is None:
                 return
-            if process.poll() is None:
+            if process is not None and process.poll() is None:
                 process.send_signal(signal.SIGINT)
             if master_fd is not None:
                 self._write(master_fd, b"\x18" * 8 + b"\x03")
+            if process is not None:
+                return
+            self.transfer_process = None
+            self.transfer_direction = None
+            self.transfer_pending.clear()
+            self._detect_buffer.clear()
+            self._suppress_protocol_until = time.monotonic() + 1.5
+            self.on_change()
 
     def stop(self) -> None:
         self._stopping = True
