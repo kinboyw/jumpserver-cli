@@ -1,324 +1,262 @@
 # jumpserver-cli
 
-`jumpserver-cli` 是一个轻量的命令行工具，用于通过 JumpServer 已授权的资产生成临时 SSH 连接，并提供交互式 SSH 和 PTY 方式的远程命令执行。
+一个面向 [JumpServer](https://github.com/jumpserver/jumpserver) 的本地 CLI 客户端。
+它通过 JumpServer API 获取当前用户已授权的资产和临时 SSH 连接信息，提供命令行参数模式与全屏 TUI 模式。
 
-它不是 JumpServer 服务端，也不会绕过 JumpServer 的权限控制。使用者必须已经拥有对应 JumpServer 实例、资产和系统用户的访问权限。
+本项目不会绕过 JumpServer 的认证、授权或审计机制。使用前必须拥有对应 JumpServer 实例、资产和系统用户的访问权限。
 
 ## 功能
 
-- 复用浏览器 JumpServer 会话 Cookie，或使用 JumpServer Access Key / Secret。
-- 按 IP 或主机名搜索资产，并选择可用系统用户。
-- 生成短时有效的 SSH 连接令牌。
-- `jssh` 进入交互式 SSH 会话。
-- `jexec` 通过 PTY 执行远程命令，并对高风险操作提供确认门禁。
-- `jscp` 保留为实验性入口。部分 JumpServer 网关要求 PTY，标准 SCP 可能不可用。
+- 使用 Access Key / Secret 或浏览器 Cookie 认证。
+- TUI 资产浏览器：搜索、鼠标点击、键盘导航、系统用户选择。
+- TUI 近期会话历史：按连接热度和最近使用时间排序。
+- `jssh`：启动交互式 SSH 会话。
+- `jexec`：通过 PTY 执行远程命令。
+- `jscp`：实验性的 SCP 文件传输入口。
+- 临时 SSH Token 本地缓存，减少重复请求。
+- 保留脚本化 CLI 参数接口，适合自动化和高级用法。
 
-## 前置条件
+## 快速开始
 
-- Python 3.10 或更高版本。
-- 能访问 JumpServer 和目标资产网络。
-- 推荐安装 [uv](https://docs.astral.sh/uv/)，也可以直接使用系统 Python。
-- 执行 SSH 连接需要 `sshpass` 和 `ssh`。
-- 浏览器 Cookie 认证需要 Tampermonkey 或兼容用户脚本的扩展。
-
-检查环境：
+### 1. 获取代码
 
 ```bash
-python3 --version
-uv --version                 # 使用 uv 时
-ssh -V
-sshpass -V
+git clone https://github.com/kinboyw/jumpserver-cli.git
+cd jumpserver-cli
 ```
 
-## 安装
-
-### 方式一：直接运行
+运行环境要求 Python 3.10+。推荐使用 [uv](https://docs.astral.sh/uv/)：
 
 ```bash
-git clone <repository-url> jumpcli
-cd jumpcli
-export JMS_BASE_URL='https://jumpserver.example.com'
 uv run python jump_cli.py --help
 ```
 
-本项目当前使用标准库，不需要下载 Python 第三方依赖。`uv run` 只负责使用项目声明的 Python 版本约束。
-
-没有 uv 时：
+不使用 uv 时可以直接运行：
 
 ```bash
-cd jumpcli
-JMS_BASE_URL='https://jumpserver.example.com' python3 jump_cli.py --help
+python3 jump_cli.py --help
 ```
 
-### 方式二：安装命令包装器
+建立 SSH 会话还需要系统已安装 `ssh` 和 `sshpass`。
 
-项目没有把源码发布成 PyPI 包。建议使用仓库内脚本，或者在个人目录建立链接：
+### 2. 配置 JumpServer 地址
+
+首次启动 TUI 会引导输入地址。也可以提前保存地址：
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$(pwd)/jssh" "$HOME/.local/bin/jssh"
-ln -sfn "$(pwd)/jexec" "$HOME/.local/bin/jexec"
-ln -sfn "$(pwd)/jscp" "$HOME/.local/bin/jscp"
+./jump_cli.py config set --base-url 'https://jumpserver.example.com'
 ```
 
-确认 `"$HOME/.local/bin"` 在 `PATH` 中，然后可以直接使用 `jssh`、`jexec` 和 `jscp`。
-
-## 配置
-
-推荐将不敏感的连接配置保存到用户配置文件。配置文件默认位置为 `~/.config/jumpserver-cli/config.json`，由 CLI 创建并设置为仅当前用户可读写：
+配置文件默认保存于 `~/.config/jumpserver-cli/config.json`，只包含地址和组织 ID。
+也可以临时使用环境变量：
 
 ```bash
-python3 jump_cli.py config set \\
-  --base-url 'https://jumpserver.example.com' \\
-  --org-id 'your-org-id'
-python3 jump_cli.py config show
+export JMS_BASE_URL='https://jumpserver.example.com'
 ```
 
-配置文件只保存 JumpServer 地址和组织 ID，不保存 Cookie、Access Key、Secret 或临时 Token。也可以只配置地址：
+地址优先级为：命令行 `--base-url` > `JMS_BASE_URL` > 配置文件。
+
+### 3. 配置认证
+
+推荐使用 Access Key / Secret：
 
 ```bash
-python3 jump_cli.py config set --base-url 'https://jumpserver.example.com'
+./jump_cli.py login-aksk --key-id 'your-access-key-id'
 ```
 
-配置优先级从高到低为：命令行 `--base-url`、环境变量 `JMS_BASE_URL`、配置文件、示例默认地址。一次性覆盖配置：
+命令会隐藏输入 Secret。凭据默认保存在 `~/.cache/jumpserver-cli/credentials.json`，权限为当前用户可读写。
 
-```bash
-JMS_BASE_URL='https://jumpserver.example.com' python3 jump_cli.py status
-python3 jump_cli.py --base-url 'https://jumpserver.example.com' status
-```
-
-如果需要把配置文件放到其他位置，可设置 `JMS_CONFIG_FILE`：
-
-```bash
-export JMS_CONFIG_FILE="$HOME/.config/jumpserver-cli/company.json"
-```
-
-常用环境变量：
-
-| 变量 | 用途 |
-| --- | --- |
-| `JMS_BASE_URL` | JumpServer 根地址，默认是示例地址，必须替换 |
-| `JMS_ORG_ID` | JumpServer 组织 ID |
-| `JMS_CONFIG_FILE` | 自定义非敏感配置文件路径 |
-| `JMS_ACCESS_KEY_ID` | 临时使用的 Access Key ID |
-| `JMS_ACCESS_KEY_SECRET` | 临时使用的 Access Key Secret |
-| `JMS_TOKEN_CACHE_TTL` | 临时 SSH Token 缓存秒数，默认 600 |
-| `JMS_TOKEN_REFRESH_COOLDOWN` | `client-url` 刷新冷却秒数，默认 30 |
-| `JMS_TOKEN_CACHE_DISABLE` | 设置为 `1` 禁用 Token 缓存 |
-
-不要把 Access Key Secret、Cookie 或 Token 写入仓库、Shell 脚本、工单或聊天记录。
-
-### 组织 ID
-
-组织 ID 会作为 `X-JMS-ORG` 发送给 JumpServer。当前 CLI 不会从 AK/SK 自动发现组织，会使用环境变量、配置文件或标准默认值。单组织的标准安装通常可以直接使用默认值：
-
-```text
-00000000-0000-0000-0000-000000000002
-```
-
-如果账号属于多个组织，登录 JumpServer 网页后打开浏览器开发者工具的 Network 面板，查看任意 `/api/v1/` 请求的 Request Headers，找到当前组织对应的 `X-JMS-ORG` 值，再保存：
-
-```bash
-./jump_cli.py config set --org-id '从请求头复制的组织ID'
-```
-
-## 认证
-
-优先使用 JumpServer Access Key / Secret。它不依赖浏览器状态，也更适合日常 CLI 使用。
-
-### Access Key / Secret
-
-临时环境变量方式：
+也可以只在当前 shell 中提供凭据：
 
 ```bash
 export JMS_ACCESS_KEY_ID='your-access-key-id'
 export JMS_ACCESS_KEY_SECRET='your-access-key-secret'
-export JMS_ORG_ID='your-org-id'
-python3 jump_cli.py status --probe --probe-search 127.0.0.1
 ```
 
-或者将凭据保存到本机权限为 `600` 的缓存文件。Secret 会被交互式隐藏输入：
+完成认证后检查状态：
 
 ```bash
-python3 jump_cli.py login-aksk --key-id 'your-access-key-id' --org-id 'your-org-id'
+./jump_cli.py status
 ```
 
-默认缓存目录为 `~/.cache/jumpserver-cli`。其中的 `credentials.json` 是敏感文件，只应保留在个人机器上。
-
-### 浏览器 Cookie
-
-1. 打开 `tampermonkey-jumpserver-session.user.js`，将顶部的 `@match` 改成公司 JumpServer 域名。
-2. 在浏览器安装并启用脚本，登录 JumpServer。
-3. 点击页面右下角的 `Copy JMS Session`。
-4. 将复制的 JSON 通过标准输入交给 CLI：
-
-```bash
-python3 jump_cli.py login
-```
-
-也可以从文件读取，但文件必须是临时文件，使用后立即删除并确保不会进入 Git：
-
-```bash
-python3 jump_cli.py login --cookie-file /path/to/session.json
-```
-
-该脚本申请 `GM_cookie` 权限以读取 HttpOnly 会话 Cookie。只应在可信浏览器配置中安装，使用完毕后可以禁用或删除。
-
-## 验证认证
-
-不打印凭据地查看本地状态：
-
-```bash
-python3 jump_cli.py status
-```
-
-调用 JumpServer API 做实际验证。`--probe-search` 应使用一个你有权限访问的、尽可能具体的资产 IP 或主机名：
-
-```bash
-python3 jump_cli.py status --probe --probe-search 127.0.0.1
-```
-
-看到 `auth_mode` 和探测成功信息后，再进行资产解析。
-
-## 常用命令
-
-### TUI 交互模式
-
-无参数启动会进入全屏资产控制台；也可以显式使用 `tui`：
+### 4. 启动 TUI
 
 ```bash
 ./jump_cli.py
+```
+
+也可以显式启动：
+
+```bash
 ./jump_cli.py tui
 ```
 
-启动时会先验证认证并加载资产树。界面左侧是资产列表，右侧显示当前资产详情和近期会话。近期会话只保存在本机，按连接次数降序、最后使用时间降序排列。
+在资源列表中直接输入字符即可检索 IP 或 Hostname。多个条件用空格分隔，所有条件都必须匹配，例如：
 
-资产、系统用户和近期会话面板支持鼠标点击选中，鼠标滚轮可以移动当前面板；选中后按 `Enter` 进入下一步或启动 SSH。
-
-首次使用时，TUI 会先引导确认真实的 JumpServer 地址，再进入 AK/SK 或浏览器 Cookie 认证流程。项目中的 `jumpserver.example.com` 只是占位地址：
-
-```bash
-./jump_cli.py
+```text
+ott 10.22
 ```
 
-如果是在脚本或非交互终端中运行，请提前配置地址：
-
-```bash
-./jump_cli.py config set --base-url 'https://your-jumpserver.example.com'
-```
+常用操作：
 
 | 按键 | 操作 |
 | --- | --- |
-| `Up` / `Down` | 移动当前列表；搜索时也立即导航 |
-| `j` / `k` | 在非资产面板中移动列表；资产面板中直接作为搜索字符 |
-| `Tab` | 在资产列表和近期会话之间切换焦点 |
-| 任意可打印字符 | 资产焦点下直接开始 IP/Hostname 检索 |
-| `Enter` | 直接连接当前 focus 的资产/系统用户/历史会话 |
-| `Esc` | 退出检索、返回资产列表或退出 TUI |
-| `r` | 重新加载资产树 |
-| `Ctrl-U` | 清空检索词 |
+| `Up` / `Down` | 移动当前列表；过滤时也可直接导航 |
+| `Tab` | 在资源列表和近期会话之间切换焦点 |
+| 任意字符 | 在资源列表中直接开始检索 |
+| `Enter` | 连接当前资源、系统用户或历史会话 |
+| `Backspace` | 删除过滤条件中的最后一个字符 |
+| `Esc` | 退出过滤、返回资源列表或退出 TUI |
+| `r` | 重新加载资源列表 |
+| `Ctrl-U` | 清空过滤条件 |
 | `Ctrl-C` | 退出 TUI |
 
-历史文件为 `~/.local/state/jumpserver-cli/history.json`，只包含资产和系统用户标识、显示名称、连接次数和时间戳，不包含 Cookie、密码、Token 或 SSH 命令。
+鼠标可以点击资源、系统用户和历史会话，也支持滚轮移动列表。
 
-解析资产和系统用户：
+## CLI 用法
 
-```bash
-python3 jump_cli.py resolve 10.0.0.10
-python3 jump_cli.py resolve app.example.internal --system-user ops
-```
-
-生成并显示临时连接信息。默认不显示临时密码：
+### 解析资源和系统用户
 
 ```bash
-python3 jump_cli.py token 10.0.0.10
-python3 jump_cli.py token 10.0.0.10 --show-password  # 仅限本地调试
+./jump_cli.py resolve 192.0.2.10
+./jump_cli.py resolve server.example.com --system-user ops
 ```
 
-进入交互式会话：
+### 连接 SSH
 
 ```bash
-./jssh 10.0.0.10
+./jssh 192.0.2.10
+./jssh -o ServerAliveInterval=30 192.0.2.10
 ```
 
-传递 SSH 选项：
+也可以使用主机名：
 
 ```bash
-./jssh -o ServerAliveInterval=30 10.0.0.10
+./jssh server.example.com
 ```
 
-执行远程命令。命令在 JumpServer 提供的 PTY shell 中运行：
+### 执行远程命令
+
+命令通过 JumpServer 提供的 PTY shell 执行：
 
 ```bash
-./jexec 10.0.0.10 -- 'hostname && uptime'
+./jexec 192.0.2.10 -- 'hostname && uptime'
 ```
 
-需要 sudo 时必须明确指定：
+涉及 sudo 或高风险操作时需要显式确认：
 
 ```bash
-./jexec --sudo 10.0.0.10 -- 'id && systemctl status nginx'
+./jexec --sudo 192.0.2.10 -- 'id'
+./jexec --sudo --yes 192.0.2.10 -- 'systemctl restart nginx'
 ```
 
-高风险、破坏性或服务影响操作还需要 `--yes`。确认前请核对目标资产、完整命令和影响范围：
+### 查看连接 Token
 
 ```bash
-./jexec --sudo --yes 10.0.0.10 -- 'systemctl restart nginx'
+./jump_cli.py token 192.0.2.10
 ```
 
-## 安全注意事项
+默认不会显示临时密码。`--show-password` 和 `--print-command` 仅适合本地调试，禁止将输出写入日志或分享。
 
-- 这是有权限的运维工具。命令会以当前 JumpServer 系统用户权限访问目标资产。
-- 不要使用 `--show-password` 或 `--print-command` 的输出作为日志、截图或文档内容。
-- 不要把 `~/.cache/jumpserver-cli/` 下的任何文件分享给他人。
-- `tokens.json` 中包含临时 SSH 凭据，即使有短 TTL 也应按 Secret 处理。
-- 不要把真实 Cookie、Access Key、内网域名、内网 IP 或资产 ID 写入 README 和提交记录。
-- `--yes` 不是权限提升，它只是确认用户已明确接受高风险操作。
-- 认证失效或怀疑泄露时，立即注销浏览器会话、删除本地缓存，并在 JumpServer 侧轮换凭据。
+### 文件传输
 
-清理本机缓存：
+```bash
+./jscp ./local.txt 192.0.2.10:/tmp/local.txt
+```
+
+`jscp` 仍属于实验性功能。JumpServer 网关或目标环境可能要求 PTY，遇到标准 SCP 不兼容时请使用 `jssh` 或 `jexec`。
+
+## 浏览器 Cookie 认证
+
+Access Key / Secret 是推荐方式。需要复用浏览器登录态时，可以使用仓库中的
+`tampermonkey-jumpserver-session.user.js`：
+
+1. 在脚本头部将示例 `@match` 改为实际 JumpServer 地址。
+2. 在浏览器安装并启用脚本，并登录 JumpServer。
+3. 点击页面上的 `Copy JMS Session`。
+4. 在终端运行 `./jump_cli.py login`，粘贴 JSON 后回车。
+
+该方式需要浏览器脚本读取 HttpOnly Cookie。Cookie 属于敏感凭据，只应在可信浏览器环境中使用，完成后应及时清理本地缓存。
+
+## 组织 ID
+
+组织 ID 会作为 `X-JMS-ORG` 请求头发送给 JumpServer。单组织实例通常可以使用默认值；多组织账号需要配置当前组织 ID：
+
+```bash
+./jump_cli.py config set --org-id 'your-org-id'
+```
+
+组织 ID 通常可以从 JumpServer 网页请求的 `X-JMS-ORG` 请求头中查看，也可以向 JumpServer 管理员获取。
+
+可用配置和环境变量：
+
+| 配置/变量 | 说明 |
+| --- | --- |
+| `--base-url` / `JMS_BASE_URL` | JumpServer 根地址 |
+| `--org-id` / `JMS_ORG_ID` | 组织 ID |
+| `JMS_CONFIG_FILE` | 自定义非敏感配置文件路径 |
+| `JMS_ACCESS_KEY_ID` | Access Key ID |
+| `JMS_ACCESS_KEY_SECRET` | Access Key Secret |
+| `JMS_TOKEN_CACHE_TTL` | Token 缓存时间，默认 600 秒 |
+| `JMS_TOKEN_REFRESH_COOLDOWN` | Token 刷新冷却时间，默认 30 秒 |
+| `JMS_TOKEN_CACHE_DISABLE=1` | 禁用 Token 缓存 |
+
+## 本地文件和安全
+
+认证和临时连接数据默认位于：
+
+- 配置：`~/.config/jumpserver-cli/config.json`
+- 凭据：`~/.cache/jumpserver-cli/credentials.json`
+- Cookie：`~/.cache/jumpserver-cli/cookies.txt`
+- Token：`~/.cache/jumpserver-cli/tokens.json`
+- 会话历史：`~/.local/state/jumpserver-cli/history.json`
+
+会话历史只保存资源和系统用户的显示信息、连接次数及时间戳，不保存 Cookie、密码或 Token。凭据、Cookie 和 Token 不得提交到 Git、写入脚本、日志、工单或聊天记录。
+
+清理本地认证缓存：
 
 ```bash
 rm -rf "$HOME/.cache/jumpserver-cli"
 ```
 
-只对上述明确目录执行清理，不要将命令中的目标替换为更宽泛的路径。
+怀疑凭据泄露时，应立即删除本地缓存，并在 JumpServer 中注销会话或轮换 Access Key。
 
 ## 故障排查
 
-### `cached session is expired` 或 HTTP 401/403
+### 认证失败或返回 401/403
 
-重新执行 `login-aksk`，或重新从浏览器复制 Cookie。确认 Access Key 具备资产查询和连接 Token 所需权限。
+确认 JumpServer 地址正确，Access Key 具备资产查询和连接 Token 权限；Cookie 认证则重新执行 `login`。
 
-### 找不到资产
+### 找不到资源
 
-使用完整 IP 或主机名，确认当前账号对该资产有授权，并检查 `JMS_BASE_URL` 是否指向正确的 JumpServer 实例。
+确认当前账号已获得资产授权，并使用完整 IP 或 Hostname 搜索。可以先执行：
+
+```bash
+./jump_cli.py status --probe --probe-search 127.0.0.1
+```
 
 ### `sshpass is required`
 
-安装操作系统对应的 `sshpass` 包。只执行 `resolve` 或 `token` 时不需要它，但建立 SSH 会话需要。
+安装系统对应的 `sshpass` 软件包。仅查询资源和 Token 不需要它，建立 SSH 会话时需要。
 
 ### SSH 返回 255
 
-CLI 会尝试使缓存 Token 失效并刷新一次。仍然失败时，先执行 `status --probe`，再检查 JumpServer 网关、目标资产网络和系统用户授权。
+客户端会尝试刷新一次过期 Token。仍然失败时，检查 JumpServer 网关、目标资产网络和系统用户授权。
 
-### `No PTY requested`
+## 开发
 
-JumpServer 网关可能拒绝标准 SCP。优先使用 `jssh` 或 `jexec`；`jscp` 当前属于实验性能力，不应作为稳定文件传输方案。
+源码位于 `src/jumpserver_cli/`，根目录脚本用于直接运行源码。本项目使用标准库和 `prompt-toolkit`。
 
-### Cookie 中没有 `jms_sessionid`
-
-浏览器脚本没有读取 HttpOnly Cookie。确认 Tampermonkey 已授予 `GM_cookie` 权限，或改用 Access Key / Secret。
-
-## 开发和自检
-
-源码入口为 `src/jumpserver_cli/cli.py`，根目录的 `jump_cli.py` 和三个包装脚本负责直接运行源码。
-
-提交前执行：
+本地自检：
 
 ```bash
-python3 -m py_compile jump_cli.py jssh jexec jscp src/jumpserver_cli/*.py
+python3 -B -m py_compile jump_cli.py jssh jexec jscp src/jumpserver_cli/*.py
+uv lock --check
 python3 jump_cli.py --help
-JMS_BASE_URL='https://jumpserver.example.com' python3 jump_cli.py status
 ```
 
-不要在没有明确授权的情况下对生产 JumpServer 或资产执行探测、连接和远程命令。
+请只在获得明确授权的 JumpServer 实例和资产上进行测试。
+
+## License
+
+当前仓库尚未指定开源许可证。若要公开发布，请在仓库根目录补充 `LICENSE` 文件，并选择适合项目的许可证。
