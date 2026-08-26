@@ -42,6 +42,7 @@ python3 jump_cli.py --help
 ```
 
 建立 SSH 会话还需要系统已安装 `ssh` 和 `sshpass`。
+使用 TUI 独立 PTY 和 ZMODEM 传输还需要 `lrzsz` 提供的 `rz` / `sz`。
 
 ### 2. 首次启动
 
@@ -95,6 +96,22 @@ export JMS_ACCESS_KEY_SECRET='your-access-key-secret'
 ```bash
 ./jump_cli.py tui
 ```
+
+需要在 TUI 内使用独立 PTY 和 ZMODEM 时，显式开启实验模式：
+
+```bash
+./jump_cli.py tui --pty
+```
+
+该选项不会改变默认的外部 SSH 客户端路径。PTY 模式中，普通输入仍然透传到远端；快捷键如下：
+
+| 快捷键 | 操作 |
+| --- | --- |
+| `Ctrl-X` `U` | 上传本地文件到远端，调用 `sz` / `rz` |
+| `Ctrl-X` `D` | 下载远端文件到本地目录，调用 `sz` / `rz` |
+| 其他 `Ctrl-X` 组合 | 原样发送到远端 |
+
+ZMODEM 是否能成功还取决于 JumpServer 网关、目标主机是否安装 `rz` / `sz` 以及远端 shell 是否允许 PTY。传输失败时可以退出 PTY 模式，继续使用默认 TUI 或 `jssh`。
 
 在资源列表中直接输入字符即可检索 IP 或 Hostname。多个条件用空格分隔，所有条件都必须匹配，例如：
 

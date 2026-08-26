@@ -1496,6 +1496,12 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     config_set.set_defaults(func=cmd_config)
 
     tui = subparsers.add_parser("tui", help="open the fullscreen asset browser")
+    tui.add_argument(
+        "--pty",
+        dest="pty_mode",
+        action="store_true",
+        help="use the experimental independent PTY session with ZMODEM shortcuts",
+    )
     tui.set_defaults(func=cmd_tui)
 
     status = subparsers.add_parser("status", help="show cached session status")

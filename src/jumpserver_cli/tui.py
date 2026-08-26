@@ -42,6 +42,7 @@ from .cli import (
     secure_write_text,
     save_config,
 )
+from .pty_session import run_pty_ssh
 
 
 HISTORY_PATH = Path.home() / ".local" / "state" / "jumpserver-cli" / "history.json"
@@ -573,10 +574,14 @@ class JumpServerTui:
                 sys.stdout.write("\033[2J\033[3J\033[H")
                 sys.stdout.flush()
                 token = get_token_for_resolved(self.store, self.client, asset, user, quiet=True)
-                command = build_ssh_command(token, ssh_options=[])
                 self.history.record(asset, user)
                 self.status = f"Connected: {asset_ip(asset)}"
-                subprocess.call(command)
+                if getattr(self.args, "pty_mode", False):
+                    command = build_ssh_command(token, ssh_options=[], force_tty=True)
+                    run_pty_ssh(command)
+                else:
+                    command = build_ssh_command(token, ssh_options=[])
+                    subprocess.call(command)
             except JumpCliError as exc:
                 self.last_error = str(exc)
             finally:
@@ -728,4 +733,5 @@ def tui_args() -> Any:
         timeout=20,
         debug=False,
         system_user=None,
+        pty_mode=False,
     )
