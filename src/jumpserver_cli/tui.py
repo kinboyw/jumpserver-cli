@@ -18,6 +18,7 @@ from typing import Any
 
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.application.current import get_app
+from prompt_toolkit.clipboard.base import ClipboardData
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.filters import Condition
@@ -69,6 +70,7 @@ STYLE = Style.from_dict(
         "item.accent": "#3fb950 bold",
         "item.warn": "#ffa657 bold",
         "terminal": "#f0f6fc",
+        "terminal.selected": "bg:#264f78 #ffffff",
         "error": "#ff7b72 bold",
         "detail.label": "#8b949e",
         "detail.value": "#f0f6fc",
@@ -202,6 +204,9 @@ class JumpServerTui:
         self.embedded_session: EmbeddedPtySession | None = None
         self.active_session_index = 0
         self.split_mode = False
+        self.terminal_selection_anchor: tuple[int, int] | None = None
+        self.terminal_selection_end: tuple[int, int] | None = None
+        self.terminal_selecting = False
         self.picker_session: EmbeddedPtySession | None = None
         self.picker_open = False
         self.picker_kind = "upload"
@@ -234,7 +239,17 @@ class JumpServerTui:
         self.search_status_window = Window(content=self.search_status_control, height=1)
         self.search_input_window = Window(content=self.search_input.control, height=1)
         self.right_window = Window(content=self.history_control, wrap_lines=False)
-        self.terminal_control = FormattedTextControl(self._terminal_text, focusable=True)
+        self.session_control = MouseTextControl(
+            self._session_list_text,
+            self._session_mouse_handler,
+            self._session_cursor_position,
+        )
+        self.session_window = Window(content=self.session_control, wrap_lines=False)
+        self.terminal_control = MouseTextControl(
+            self._terminal_text,
+            self._terminal_mouse_handler,
+            self._terminal_cursor_position,
+        )
         self.terminal_window = Window(content=self.terminal_control, wrap_lines=False)
         self.picker_path_input = TextArea(
             text=str(self.picker_path),
@@ -299,13 +314,31 @@ class JumpServerTui:
             ],
             padding=1,
         )
+        terminal_body = ConditionalContainer(
+            Window(content=self.terminal_control, wrap_lines=False),
+            filter=Condition(lambda: len(self.embedded_sessions) <= 1),
+        )
+        multi_terminal_body = ConditionalContainer(
+            VSplit(
+                [
+                    Window(content=self.session_control, width=D(preferred=34, min=24)),
+                    Window(width=1, char="|", style="class:frame"),
+                    Window(content=self.terminal_control, wrap_lines=False),
+                ],
+                padding=1,
+            ),
+            filter=Condition(lambda: len(self.embedded_sessions) > 1),
+        )
         base = HSplit(
             [
                 Window(content=FormattedTextControl(self._header_text), height=1, style="class:header"),
                 ConditionalContainer(self.search_input_window, filter=Condition(lambda: self.filter_mode)),
                 ConditionalContainer(self.search_status_window, filter=Condition(lambda: not self.filter_mode)),
                 ConditionalContainer(body, filter=Condition(lambda: self.view != "terminal")),
-                ConditionalContainer(self.terminal_window, filter=Condition(lambda: self.view == "terminal")),
+                ConditionalContainer(
+                    HSplit([terminal_body, multi_terminal_body]),
+                    filter=Condition(lambda: self.view == "terminal"),
+                ),
                 Window(content=FormattedTextControl(self._footer_text), height=1, style="class:footer"),
             ],
             style="class:root",
@@ -359,8 +392,9 @@ class JumpServerTui:
         if session is None:
             return FormattedText([("class:item.muted", "SSH session is not running")])
         rows: FormattedText = []
-        for line in session.display_snapshot():
-            rows.append(("class:terminal", line + "\n"))
+        for row, line in enumerate(session.display_snapshot()):
+            rows.extend(self._terminal_render_line(row, line))
+            rows.append(("class:terminal", "\n"))
         return rows
 
     def _terminal_split_text(self, sessions: list[EmbeddedPtySession]) -> FormattedText:
@@ -373,20 +407,156 @@ class JumpServerTui:
             rows.append(("class:terminal", f"{left_line:<{width}} | {right_line}\n"))
         return rows
 
+    def _terminal_cursor_position(self) -> Point:
+        session = self.embedded_session
+        if session is None:
+            return Point(x=0, y=0)
+        return Point(x=session.screen.cursor.x, y=session.screen.cursor.y)
+
+    def _session_cursor_position(self) -> Point:
+        return Point(x=0, y=self.active_session_index + 1)
+
+    def _session_list_text(self) -> FormattedText:
+        rows: FormattedText = [("class:frame.focused", " ACTIVE SESSIONS\n")]
+        for index, session in enumerate(self.embedded_sessions):
+            asset = getattr(session, "asset_label", "SSH session")
+            marker = ">" if index == self.active_session_index else " "
+            style = "class:item.selected" if index == self.active_session_index else "class:item"
+            rows.append((style, f"{marker} {index + 1:02d} {asset}\n"))
+        rows.append(("class:item.muted", "\n  Enter switch  Ctrl-N new"))
+        return rows
+
+    def _session_mouse_handler(self, event: MouseEvent) -> None:
+        if event.event_type == MouseEventType.SCROLL_UP:
+            self._switch_session(-1)
+            return
+        if event.event_type == MouseEventType.SCROLL_DOWN:
+            self._switch_session(1)
+            return
+        if event.event_type != MouseEventType.MOUSE_DOWN or event.button != MouseButton.LEFT:
+            return
+        index = event.position.y - 1
+        if 0 <= index < len(self.embedded_sessions):
+            self._switch_session_to(index)
+
+    def _switch_session_to(self, index: int) -> None:
+        if not self.embedded_sessions:
+            return
+        self.active_session_index = max(0, min(index, len(self.embedded_sessions) - 1))
+        self.embedded_session = self.embedded_sessions[self.active_session_index]
+        self.view = "terminal"
+        self._focus_terminal()
+        self.status = f"Session {self.active_session_index + 1}/{len(self.embedded_sessions)}"
+        self._invalidate()
+
+    def _terminal_selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        if self.terminal_selection_anchor is None or self.terminal_selection_end is None:
+            return None
+        first, second = self.terminal_selection_anchor, self.terminal_selection_end
+        return (first, second) if first <= second else (second, first)
+
+    def _terminal_selection_text(self) -> str:
+        bounds = self._terminal_selection_bounds()
+        session = self.embedded_session
+        if bounds is None or session is None:
+            return ""
+        (start_y, start_x), (end_y, end_x) = bounds
+        lines = session.display_snapshot()
+        if not lines:
+            return ""
+        start_y = max(0, min(start_y, len(lines) - 1))
+        end_y = max(0, min(end_y, len(lines) - 1))
+        selected: list[str] = []
+        for row in range(start_y, end_y + 1):
+            line = lines[row]
+            left = start_x if row == start_y else 0
+            right = end_x if row == end_y else len(line)
+            selected.append(line[max(0, left) : max(left, right)].rstrip())
+        return "\n".join(selected)
+
+    def _terminal_is_selected(self, row: int, column: int) -> bool:
+        bounds = self._terminal_selection_bounds()
+        if bounds is None:
+            return False
+        (start_y, start_x), (end_y, end_x) = bounds
+        return (start_y < row < end_y) or (
+            start_y == end_y == row and start_x <= column < end_x
+        ) or (row == start_y and row != end_y and column >= start_x) or (
+            row == end_y and row != start_y and column < end_x
+        )
+
+    def _terminal_render_line(self, row: int, line: str) -> list[tuple[str, str]]:
+        fragments: list[tuple[str, str]] = []
+        if not line:
+            return [("class:terminal", "")]
+        begin = 0
+        selected = self._terminal_is_selected(row, 0)
+        for column in range(1, len(line) + 1):
+            current = column < len(line) and self._terminal_is_selected(row, column)
+            if current != selected:
+                fragments.append(("class:terminal.selected" if selected else "class:terminal", line[begin:column]))
+                begin = column
+                selected = current
+        fragments.append(("class:terminal.selected" if selected else "class:terminal", line[begin:]))
+        return fragments
+
+    def _terminal_mouse_handler(self, event: MouseEvent) -> None:
+        if event.event_type == MouseEventType.SCROLL_UP:
+            return
+        if event.event_type == MouseEventType.SCROLL_DOWN:
+            return
+        point = (max(0, event.position.y), max(0, event.position.x))
+        if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+            self.terminal_selection_anchor = point
+            self.terminal_selection_end = point
+            self.terminal_selecting = True
+            self._focus_terminal()
+            self._invalidate()
+        elif event.event_type == MouseEventType.MOUSE_MOVE and self.terminal_selecting:
+            self.terminal_selection_end = point
+            self._invalidate()
+        elif event.event_type == MouseEventType.MOUSE_UP and self.terminal_selecting:
+            self.terminal_selection_end = point
+            self.terminal_selecting = False
+            self._copy_terminal_selection()
+
+    def _copy_terminal_selection(self) -> None:
+        text = self._terminal_selection_text()
+        if not text:
+            return
+        with __import__("contextlib").suppress(Exception):
+            get_app().clipboard.set_data(ClipboardData(text))
+        copied = False
+        for command in (("wl-copy",), ("xclip", "-selection", "clipboard"), ("xsel", "--clipboard", "--input"), ("pbcopy",)):
+            try:
+                subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1)
+            except (FileNotFoundError, OSError, subprocess.SubprocessError):
+                continue
+            copied = True
+            break
+        self.status = "Selected text copied" if copied else "Selected text copied to TUI clipboard"
+        self._invalidate()
+
     def _sync_terminal_size(self, sessions: list[EmbeddedPtySession]) -> None:
         """Keep pyte and the child SSH PTY aligned with the visible pane."""
-        try:
-            size = get_app().output.get_size()
-        except Exception:
+        dimensions = self._terminal_dimensions()
+        if dimensions is None:
             return
-        rows = max(5, size.rows - 3)
+        columns, rows = dimensions
         if self.split_mode and len(sessions) >= 2:
-            columns = max(20, (size.columns - 3) // 2)
+            columns = max(20, (columns - 3) // 2)
             for session in sessions[:2]:
                 session.resize(columns, rows)
         else:
-            for session in sessions:
-                session.resize(max(20, size.columns), rows)
+            for session in self.embedded_sessions:
+                session.resize(columns, rows)
+
+    def _terminal_dimensions(self) -> tuple[int, int] | None:
+        try:
+            size = get_app().output.get_size()
+        except Exception:
+            return None
+        return max(20, size.columns), max(5, size.rows - 3)
 
     def _visible_sessions(self) -> list[EmbeddedPtySession]:
         if not self.embedded_sessions:
@@ -712,6 +882,8 @@ class JumpServerTui:
                     ("class:footer.key", "Ctrl-N"), ("class:item.muted", " new session  "),
                     ("class:footer.key", "F2"), ("class:item.muted", " next  "),
                     ("class:footer.key", "F3"), ("class:item.muted", " split  "),
+                    ("class:footer.key", "F4/Ctrl-N"), ("class:item.muted", " resources  "),
+                    ("class:footer.key", "Ctrl-Y"), ("class:item.muted", " copy selection  "),
                     ("class:footer.key", "Ctrl-X U/D"), ("class:item.muted", " ZMODEM"),
                 ]
             )
@@ -861,6 +1033,8 @@ class JumpServerTui:
                 if index < self.active_session_index:
                     self.active_session_index -= 1
             if self.embedded_sessions:
+                if len(self.embedded_sessions) < 2:
+                    self.split_mode = False
                 self.active_session_index = min(self.active_session_index, len(self.embedded_sessions) - 1)
                 self.embedded_session = self.embedded_sessions[self.active_session_index]
                 self.status = f"SSH session exited ({exit_code}); active sessions: {len(self.embedded_sessions)}"
@@ -892,6 +1066,8 @@ class JumpServerTui:
         self.users = []
         self.user_index = 0
         self.focus = "assets"
+        self.terminal_selection_anchor = None
+        self.terminal_selection_end = None
         self.status = f"Select an asset for a new SSH session ({len(self.embedded_sessions)} open)"
         self._focus_navigation()
         self._invalidate()
@@ -899,12 +1075,7 @@ class JumpServerTui:
     def _switch_session(self, delta: int) -> None:
         if not self.embedded_sessions:
             return
-        self.active_session_index = (self.active_session_index + delta) % len(self.embedded_sessions)
-        self.embedded_session = self.embedded_sessions[self.active_session_index]
-        self.view = "terminal"
-        self._focus_terminal()
-        self.status = f"Session {self.active_session_index + 1}/{len(self.embedded_sessions)}"
-        self._invalidate()
+        self._switch_session_to((self.active_session_index + delta) % len(self.embedded_sessions))
 
     def _toggle_split(self) -> None:
         if len(self.embedded_sessions) < 2:
@@ -938,15 +1109,21 @@ class JumpServerTui:
             command = build_ssh_command(token, ssh_options=[], force_tty=True)
             self.history.record(asset, user)
             self.view = "terminal"
+            self.terminal_selection_anchor = None
+            self.terminal_selection_end = None
             self.status = f"Opening SSH: {asset_ip(asset)}"
             holder: dict[str, EmbeddedPtySession] = {}
+            dimensions = self._terminal_dimensions() or (120, 40)
             session = EmbeddedPtySession(
                 command,
+                columns=dimensions[0],
+                lines=dimensions[1],
                 on_change=lambda: self._terminal_changed(holder["session"]),
                 on_zmodem=lambda direction: self._terminal_zmodem(holder["session"], direction),
                 on_exit=lambda code: self._terminal_exited(holder["session"], code),
             )
             holder["session"] = session
+            session.asset_label = f"{asset_ip(asset)} {asset_hostname(asset)}"
             self.embedded_sessions.append(session)
             self.active_session_index = len(self.embedded_sessions) - 1
             self.embedded_session = session
@@ -1015,6 +1192,9 @@ class JumpServerTui:
             elif self.view == "users":
                 self.view = "assets"
                 self.users = []
+            elif self.view == "assets" and self.embedded_sessions:
+                self.view = "terminal"
+                self._focus_terminal()
             else:
                 self._stop_embedded_sessions()
                 event.app.exit(result=0)
@@ -1029,6 +1209,10 @@ class JumpServerTui:
 
         @keys.add("c-n", filter=terminal_active, eager=True)
         def _new_session(event: Any) -> None:
+            self._open_new_session()
+
+        @keys.add("f4", filter=terminal_active, eager=True)
+        def _resources(event: Any) -> None:
             self._open_new_session()
 
         @keys.add("f2", filter=terminal_active, eager=True)
@@ -1098,6 +1282,14 @@ class JumpServerTui:
             elif self.filter_mode:
                 self.search_input.buffer.text = ""
                 self._invalidate()
+
+        @keys.add("c-y", filter=terminal_active, eager=True)
+        def _copy_selection(event: Any) -> None:
+            self._copy_terminal_selection()
+
+        @keys.add("c-insert", filter=terminal_active, eager=True)
+        def _copy_selection_insert(event: Any) -> None:
+            self._copy_terminal_selection()
 
         @keys.add("up", filter=terminal_active, eager=True)
         def _terminal_up(event: Any) -> None:

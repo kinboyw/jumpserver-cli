@@ -86,6 +86,7 @@ class EmbeddedPtySession:
             os.execvp(self.command[0], self.command)
         self.pid = pid
         self.master_fd = master_fd
+        self._set_pty_size(notify=False)
         self._thread = threading.Thread(target=self._reader, name="jumpcli-ssh-pty", daemon=True)
         self._thread.start()
 
@@ -104,17 +105,22 @@ class EmbeddedPtySession:
                 self.screen.resize(lines, columns)
             if self.master_fd is not None:
                 if changed:
-                    with contextlib.suppress(OSError):
-                        fcntl.ioctl(
-                            self.master_fd,
-                            termios.TIOCSWINSZ,
-                            struct.pack("HHHH", lines, columns, 0, 0),
-                        )
-                    if self.pid is not None:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.kill(self.pid, signal.SIGWINCH)
+                    self._set_pty_size(notify=True)
         if changed:
             self.on_change()
+
+    def _set_pty_size(self, *, notify: bool) -> None:
+        if self.master_fd is None:
+            return
+        with contextlib.suppress(OSError):
+            fcntl.ioctl(
+                self.master_fd,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", self.screen.lines, self.screen.columns, 0, 0),
+            )
+        if notify and self.pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(self.pid, signal.SIGWINCH)
 
     def display_snapshot(self) -> tuple[str, ...]:
         """Return a consistent screen image for the prompt-toolkit renderer."""
