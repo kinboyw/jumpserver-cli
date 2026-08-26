@@ -7,12 +7,16 @@ keeps the PTY readable while the prompt-toolkit application remains active.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import pty
 import re
 import select
 import signal
+import struct
 import subprocess
+import termios
 import threading
 import time
 from collections.abc import Callable
@@ -91,13 +95,31 @@ class EmbeddedPtySession:
                 self._write(self.master_fd, data)
 
     def resize(self, columns: int, lines: int) -> None:
-        """Resize the screen model; remote resize can be added with ioctl later."""
+        """Resize both the local screen model and the SSH client's PTY."""
         columns = max(20, columns)
         lines = max(5, lines)
         with self._lock:
-            if self.screen.columns != columns or self.screen.lines != lines:
+            changed = self.screen.columns != columns or self.screen.lines != lines
+            if changed:
                 self.screen.resize(lines, columns)
-                self.on_change()
+            if self.master_fd is not None:
+                if changed:
+                    with contextlib.suppress(OSError):
+                        fcntl.ioctl(
+                            self.master_fd,
+                            termios.TIOCSWINSZ,
+                            struct.pack("HHHH", lines, columns, 0, 0),
+                        )
+                    if self.pid is not None:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.kill(self.pid, signal.SIGWINCH)
+        if changed:
+            self.on_change()
+
+    def display_snapshot(self) -> tuple[str, ...]:
+        """Return a consistent screen image for the prompt-toolkit renderer."""
+        with self._lock:
+            return tuple(self.screen.display)
 
     def start_transfer(self, command: list[str], *, cwd: str | None = None) -> None:
         with self._lock:
@@ -191,7 +213,8 @@ class EmbeddedPtySession:
             self.on_exit(exit_code)
 
     def _consume_screen(self, data: bytes) -> None:
-        self.stream.feed(data)
+        with self._lock:
+            self.stream.feed(data)
         self.on_change()
 
     def _consume_or_detect(self, data: bytes) -> None:

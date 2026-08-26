@@ -352,18 +352,19 @@ class JumpServerTui:
 
     def _terminal_text(self) -> FormattedText:
         sessions = self._visible_sessions()
+        self._sync_terminal_size(sessions)
         if self.split_mode and len(sessions) >= 2:
             return self._terminal_split_text(sessions[:2])
         session = self.embedded_session
         if session is None:
             return FormattedText([("class:item.muted", "SSH session is not running")])
         rows: FormattedText = []
-        for line in session.screen.display:
+        for line in session.display_snapshot():
             rows.append(("class:terminal", line + "\n"))
         return rows
 
     def _terminal_split_text(self, sessions: list[EmbeddedPtySession]) -> FormattedText:
-        left, right = sessions[0].screen.display, sessions[1].screen.display
+        left, right = sessions[0].display_snapshot(), sessions[1].display_snapshot()
         rows: FormattedText = []
         width = max(20, max((len(line) for line in left), default=20))
         for index in range(max(len(left), len(right))):
@@ -371,6 +372,21 @@ class JumpServerTui:
             right_line = right[index] if index < len(right) else ""
             rows.append(("class:terminal", f"{left_line:<{width}} | {right_line}\n"))
         return rows
+
+    def _sync_terminal_size(self, sessions: list[EmbeddedPtySession]) -> None:
+        """Keep pyte and the child SSH PTY aligned with the visible pane."""
+        try:
+            size = get_app().output.get_size()
+        except Exception:
+            return
+        rows = max(5, size.rows - 3)
+        if self.split_mode and len(sessions) >= 2:
+            columns = max(20, (size.columns - 3) // 2)
+            for session in sessions[:2]:
+                session.resize(columns, rows)
+        else:
+            for session in sessions:
+                session.resize(max(20, size.columns), rows)
 
     def _visible_sessions(self) -> list[EmbeddedPtySession]:
         if not self.embedded_sessions:
