@@ -10,6 +10,7 @@ import os
 import pty
 import select
 import shlex
+import signal
 import subprocess
 import sys
 import termios
@@ -19,7 +20,7 @@ from pathlib import Path
 
 
 TRANSFER_PREFIX = b"\x18"  # Ctrl-X, kept out of the remote stream for our shortcuts.
-TRANSFER_TIMEOUT = 1.0
+TRANSFER_ESCAPE_TIMEOUT = 1.0
 
 
 def _write(fd: int, data: bytes) -> None:
@@ -50,6 +51,54 @@ def _remote_command(master_fd: int, command: str) -> None:
     _write(master_fd, command.encode("utf-8") + b"\r")
 
 
+def _run_transfer_process(
+    command: list[str],
+    master_fd: int,
+    terminal_fd: int,
+    *,
+    cwd: str | None = None,
+) -> bool:
+    """Run lrzsz while keeping Ctrl-C responsive in the parent relay."""
+    process = subprocess.Popen(
+        command,
+        stdin=master_fd,
+        stdout=master_fd,
+        stderr=terminal_fd,
+        cwd=cwd,
+        close_fds=True,
+    )
+    cancelled = False
+    try:
+        while process.poll() is None:
+            readable, _, _ = select.select([terminal_fd], [], [], 0.2)
+            if terminal_fd not in readable:
+                continue
+            data = os.read(terminal_fd, 4096)
+            if not data:
+                continue
+            if b"\x03" in data:
+                cancelled = True
+                process.send_signal(signal.SIGINT)
+                # CAN cancels the ZMODEM receiver; ETX also returns the
+                # remote shell from rz/sz on implementations that need it.
+                _write(master_fd, b"\x18" * 8 + b"\x03")
+                break
+            _write(master_fd, data)
+        if cancelled:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        else:
+            process.wait()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    return not cancelled and process.returncode == 0
+
+
 def _run_zmodem(master_fd: int, terminal_fd: int, cooked_attrs: list, *, upload: bool) -> None:
     """Run local rz/sz against the remote shell through the SSH PTY.
 
@@ -68,16 +117,9 @@ def _run_zmodem(master_fd: int, terminal_fd: int, cooked_attrs: list, *, upload:
             print("jump-cli: sz is required; install the lrzsz package", file=sys.stderr)
             return
         print("Starting ZMODEM upload...", file=sys.stderr)
-        _remote_command(master_fd, "rz")
+        _remote_command(master_fd, "rz -be")
         time.sleep(0.2)
-        subprocess.run(
-            ["sz", "--", str(source_path)],
-            stdin=master_fd,
-            stdout=master_fd,
-            stderr=terminal_fd,
-            close_fds=True,
-            check=False,
-        )
+        ok = _run_transfer_process(["sz", "-be", "--", str(source_path)], master_fd, terminal_fd)
     else:
         remote_path = _prompt_in_cooked_terminal(terminal_fd, cooked_attrs, "\nDownload remote file: ")
         if not remote_path:
@@ -91,19 +133,14 @@ def _run_zmodem(master_fd: int, terminal_fd: int, cooked_attrs: list, *, upload:
             print("jump-cli: rz is required; install the lrzsz package", file=sys.stderr)
             return
         print("Starting ZMODEM download...", file=sys.stderr)
-        command = f"sz -- {shlex.quote(remote_path)}"
+        command = f"sz -be -- {shlex.quote(remote_path)}"
         _remote_command(master_fd, command)
         time.sleep(0.2)
-        subprocess.run(
-            ["rz"],
-            stdin=master_fd,
-            stdout=master_fd,
-            stderr=terminal_fd,
-            cwd=str(destination_path),
-            close_fds=True,
-            check=False,
-        )
-    print("ZMODEM transfer finished.\n", file=sys.stderr)
+        ok = _run_transfer_process(["rz", "-be"], master_fd, terminal_fd, cwd=str(destination_path))
+    if ok:
+        print("ZMODEM transfer finished.\n", file=sys.stderr)
+    else:
+        print("ZMODEM transfer cancelled or failed.\n", file=sys.stderr)
 
 
 def _command_exists(name: str) -> bool:
@@ -134,7 +171,7 @@ def run_pty_ssh(command: list[str]) -> int:
     try:
         _set_raw(terminal_fd)
         while True:
-            if pending_prefix and time.monotonic() - prefix_started > TRANSFER_TIMEOUT:
+            if pending_prefix and time.monotonic() - prefix_started > TRANSFER_ESCAPE_TIMEOUT:
                 _write(master_fd, TRANSFER_PREFIX)
                 pending_prefix = False
 
