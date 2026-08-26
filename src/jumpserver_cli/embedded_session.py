@@ -23,6 +23,22 @@ import pyte
 
 
 ZMODEM_MARKER = re.compile(rb"(?:\*\*)?\x18B([0-9a-fA-F]{2})")
+ZMODEM_PREFIXES = tuple(
+    marker[:length]
+    for marker in (b"**\x18B", b"\x18B")
+    for length in range(1, len(marker) + 1)
+)
+
+
+class SessionScreen(pyte.Screen):
+    """pyte screen that can answer terminal queries from remote programs."""
+
+    def __init__(self, columns: int, lines: int, send: Callable[[bytes], None]) -> None:
+        super().__init__(columns, lines)
+        self._send = send
+
+    def write_process_input(self, data: str) -> None:
+        self._send(data.encode("utf-8"))
 
 
 class EmbeddedPtySession:
@@ -42,8 +58,8 @@ class EmbeddedPtySession:
         self.on_change = on_change
         self.on_zmodem = on_zmodem
         self.on_exit = on_exit
-        self.screen = pyte.Screen(columns, lines)
-        self.stream = pyte.Stream(self.screen)
+        self.screen = SessionScreen(columns, lines, self.send)
+        self.stream = pyte.ByteStream(self.screen)
         self.master_fd: int | None = None
         self.pid: int | None = None
         self.transfer_process: subprocess.Popen[bytes] | None = None
@@ -175,7 +191,7 @@ class EmbeddedPtySession:
             self.on_exit(exit_code)
 
     def _consume_screen(self, data: bytes) -> None:
-        self.stream.feed(data.decode("utf-8", errors="replace"))
+        self.stream.feed(data)
         self.on_change()
 
     def _consume_or_detect(self, data: bytes) -> None:
@@ -195,18 +211,29 @@ class EmbeddedPtySession:
         buffered = bytes(self._detect_buffer)
         match = ZMODEM_MARKER.search(buffered)
         if not match:
-            # Keep enough bytes to recognize a marker split across reads.
-            safe_length = max(0, len(self._detect_buffer) - 6)
+            # Keep only a real possible marker prefix. Caching arbitrary
+            # trailing bytes makes normal shell echo appear one keypress late.
+            remainder_length = max(
+                (len(prefix) for prefix in ZMODEM_PREFIXES if buffered.endswith(prefix)),
+                default=0,
+            )
+            safe_length = len(buffered) - remainder_length
             if safe_length:
-                self._consume_screen(bytes(self._detect_buffer[:safe_length]))
-                del self._detect_buffer[:safe_length]
+                self._consume_screen(buffered[:safe_length])
+                self._detect_buffer = bytearray(buffered[safe_length:])
             return
         frame_type = int(match.group(1), 16)
         # ZRINIT means the remote rz is waiting for a local sender (upload).
         # ZRQINIT/ZFILE announce a remote sender (download).
         direction = "upload" if frame_type == 1 else "download" if frame_type in (0, 4) else "unknown"
         if direction == "unknown":
-            self._consume_screen(buffered)
+            if match.start():
+                self._consume_screen(buffered[:match.start()])
+            # ZFIN/ZACK and other protocol frames must never be rendered as
+            # terminal text. Preserve any shell output after their line.
+            newline = buffered.find(b"\n", match.end())
+            if newline >= 0 and newline + 1 < len(buffered):
+                self._consume_screen(buffered[newline + 1 :])
             self._detect_buffer.clear()
             return
         if match.start():
