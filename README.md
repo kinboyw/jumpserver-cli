@@ -29,7 +29,7 @@ git clone https://github.com/kinboyw/jumpserver-cli.git
 cd jumpserver-cli
 ```
 
-运行环境要求 Python 3.10+。推荐使用 [uv](https://docs.astral.sh/uv/)：
+运行环境要求 Python 3.10+。项目依赖 `prompt-toolkit` 和 `pyte`，推荐使用 [uv](https://docs.astral.sh/uv/) 自动创建环境：
 
 ```bash
 uv run python jump_cli.py --help
@@ -38,6 +38,7 @@ uv run python jump_cli.py --help
 不使用 uv 时可以直接运行：
 
 ```bash
+python3 -m pip install 'prompt-toolkit>=3,<4' 'pyte>=0.8,<1'
 python3 jump_cli.py --help
 ```
 
@@ -97,22 +98,25 @@ export JMS_ACCESS_KEY_SECRET='your-access-key-secret'
 ./jump_cli.py tui
 ```
 
-需要在 TUI 内使用独立 PTY 和 ZMODEM 时，显式开启实验模式：
+需要在 TUI 内嵌 SSH、使用独立 PTY 和 ZMODEM 时，显式开启 PTY 模式：
 
 ```bash
 ./jump_cli.py tui --pty
 ```
 
-该选项不会改变默认的外部 SSH 客户端路径。PTY 模式中，普通输入仍然透传到远端；快捷键如下：
+该选项不会改变默认的外部 SSH 客户端路径。PTY 模式中，SSH 会话直接显示在 TUI 内，普通输入透传到远端；快捷键如下：
 
 | 快捷键 | 操作 |
 | --- | --- |
 | `Ctrl-X` `U` | 上传本地文件到远端，调用 `sz` / `rz` |
 | `Ctrl-X` `D` | 下载远端文件到本地目录，调用 `sz` / `rz` |
 | `Ctrl-C` | 中断当前 ZMODEM 传输 |
+| `Ctrl-N` | 返回资源树，创建新的 SSH 会话 |
+| `F2` | 切换活动 SSH 会话 |
+| `F3` | 开关两会话并排视图 |
 | 其他 `Ctrl-X` 组合 | 原样发送到远端 |
 
-传输使用二进制和控制字符转义模式（`-be`）。ZMODEM 是否能成功还取决于 JumpServer 网关、目标主机是否安装 `rz` / `sz` 以及远端 shell 是否允许 PTY。传输失败时可以退出 PTY 模式，继续使用默认 TUI 或 `jssh`。
+远端直接运行 `rz` 或 `sz` 后，TUI 会自动识别 ZMODEM 握手并打开文件选择器。文件选择器支持路径输入、目录导航、鼠标点击和上传多选。传输使用二进制和控制字符转义模式（`-be`）。ZMODEM 是否能成功还取决于 JumpServer 网关、目标主机是否安装 `rz` / `sz` 以及远端 shell 是否允许 PTY。传输失败时可以退出 PTY 模式，继续使用默认 TUI 或 `jssh`。
 
 在资源列表中直接输入字符即可检索 IP 或 Hostname。多个条件用空格分隔，所有条件都必须匹配，例如：
 
