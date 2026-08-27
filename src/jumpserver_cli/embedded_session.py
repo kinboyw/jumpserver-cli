@@ -77,6 +77,7 @@ class EmbeddedPtySession:
         self._suppress_protocol_until = 0.0
         self._input_pending = bytearray()
         self._input_ready = False
+        self._input_started_at = time.monotonic()
 
     @property
     def alive(self) -> bool:
@@ -88,6 +89,7 @@ class EmbeddedPtySession:
             os.execvp(self.command[0], self.command)
         self.pid = pid
         self.master_fd = master_fd
+        self._input_started_at = time.monotonic()
         self._set_pty_size(notify=False)
         self._thread = threading.Thread(target=self._reader, name="jumpcli-ssh-pty", daemon=True)
         self._thread.start()
@@ -96,6 +98,7 @@ class EmbeddedPtySession:
         with self._lock:
             if not data:
                 return
+            self._release_pending_if_ready()
             if not self._input_ready:
                 self._input_pending.extend(data)
             elif self.master_fd is not None:
@@ -199,6 +202,8 @@ class EmbeddedPtySession:
             while not self._stopping:
                 readable, _, _ = select.select([self.master_fd], [], [], 0.1)
                 if self.master_fd not in readable:
+                    with self._lock:
+                        self._release_pending_if_ready()
                     self._poll_transfer()
                     continue
                 try:
@@ -237,15 +242,22 @@ class EmbeddedPtySession:
     def _consume_screen(self, data: bytes) -> None:
         with self._lock:
             self.stream.feed(data)
-            if not self._input_ready:
-                for line in reversed(self.screen.display):
-                    if line.rstrip() and re.search(r"(?:[$#>%])\s*$", line.rstrip()):
-                        self._input_ready = True
-                        break
-                if self._input_ready and self._input_pending and self.master_fd is not None:
-                    self._write(self.master_fd, bytes(self._input_pending))
-                    self._input_pending.clear()
+            self._release_pending_if_ready()
         self.on_change()
+
+    def _release_pending_if_ready(self) -> None:
+        if not self._input_ready:
+            for line in reversed(self.screen.display):
+                if line.rstrip() and re.search(r"(?:[$#>%])\s*$", line.rstrip()):
+                    self._input_ready = True
+                    break
+        # A custom prompt may not end in a conventional shell marker. Do not
+        # keep input trapped forever after the SSH startup grace period.
+        if not self._input_ready and time.monotonic() - self._input_started_at >= 3.0:
+            self._input_ready = True
+        if self._input_ready and self._input_pending and self.master_fd is not None:
+            self._write(self.master_fd, bytes(self._input_pending))
+            self._input_pending.clear()
 
     def _consume_or_detect(self, data: bytes) -> None:
         if time.monotonic() < self._suppress_protocol_until:

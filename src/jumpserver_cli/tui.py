@@ -285,6 +285,7 @@ class JumpServerTui:
             style=STYLE,
             full_screen=True,
             mouse_support=True,
+            refresh_interval=0.5,
         )
 
     @property
@@ -538,12 +539,13 @@ class JumpServerTui:
             return [("class:terminal", "")]
         session = self.embedded_session
         cursor_x, cursor_y, cursor_hidden = session.cursor_snapshot() if session else (-1, -1, True)
+        cursor_visible = self._cursor_blink_visible()
         begin = 0
         selected = self._terminal_is_selected(row, 0)
-        cursor = not cursor_hidden and row == cursor_y and cursor_x == 0
+        cursor = cursor_visible and not cursor_hidden and row == cursor_y and cursor_x == 0
         for column in range(1, len(line) + 1):
             current = column < len(line) and self._terminal_is_selected(row, column)
-            current_cursor = not cursor_hidden and row == cursor_y and column == cursor_x
+            current_cursor = cursor_visible and not cursor_hidden and row == cursor_y and column == cursor_x
             if current != selected or current_cursor != cursor:
                 style = "class:terminal.cursor" if cursor else "class:terminal.selected" if selected else "class:terminal"
                 fragments.append((style, line[begin:column]))
@@ -553,6 +555,10 @@ class JumpServerTui:
         style = "class:terminal.cursor" if cursor else "class:terminal.selected" if selected else "class:terminal"
         fragments.append((style, line[begin:]))
         return fragments
+
+    @staticmethod
+    def _cursor_blink_visible() -> bool:
+        return int(time.monotonic() * 2) % 2 == 0
 
     def _terminal_mouse_handler(self, event: MouseEvent) -> None:
         if event.event_type == MouseEventType.SCROLL_UP:
