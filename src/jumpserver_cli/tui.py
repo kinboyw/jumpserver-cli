@@ -1251,11 +1251,12 @@ class JumpServerTui:
             event.app.exit(result=0)
 
         @keys.add("c-c", filter=terminal_input_active, eager=True)
-        def _terminal_interrupt(event: Any) -> None:
+        def _terminal_copy(event: Any) -> None:
             if self._terminal_selection_text():
                 self._copy_terminal_selection()
             else:
-                self._send_terminal(b"\x03")
+                self.status = "No terminal selection"
+                self._invalidate()
 
         @keys.add("c-c", filter=picker_active, eager=True)
         def _picker_cancel(event: Any) -> None:
