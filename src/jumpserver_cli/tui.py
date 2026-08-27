@@ -12,6 +12,7 @@ import difflib
 import json
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -224,6 +225,8 @@ class JumpServerTui:
         self.user_index = 0
         self.history_index = 0
         self.users: list[dict[str, Any]] = []
+        self._pending_user_assets: set[str] = set()
+        self._pending_connection_keys: set[tuple[str, str]] = set()
         self.status = "Ready"
         self.last_error = ""
         self.embedded_sessions: list[EmbeddedPtySession] = []
@@ -231,12 +234,17 @@ class JumpServerTui:
         self.active_session_index = 0
         self.split_mode = False
         self.batch_connecting = False
+        self._batch_pending = 0
+        self._batch_opened = 0
+        self._batch_skipped = 0
+        self._batch_anchor_index = 0
         self.terminal_command_prefix = False
         self.context_menu_open = False
         self.context_menu_index = 0
         self.session_menu_open = False
         self.session_menu_index = 0
         self.session_menu_target: EmbeddedPtySession | None = None
+        self.terminate_confirm_open = False
         self._clipboard_owned = False
         self.terminal_selection_anchor: tuple[int, int] | None = None
         self.terminal_selection_end: tuple[int, int] | None = None
@@ -322,6 +330,25 @@ class JumpServerTui:
             width=32,
             height=5,
         )
+        self.terminate_confirm_control = MouseTextControl(
+            self._terminate_confirm_text,
+            self._terminate_confirm_mouse_handler,
+            lambda: Point(x=0, y=0),
+        )
+        self.terminate_confirm_float = Float(
+            content=ConditionalContainer(
+                Frame(
+                    Window(content=self.terminate_confirm_control, wrap_lines=False),
+                    title=" CONFIRM ",
+                    style="class:popup",
+                ),
+                filter=Condition(lambda: self.terminate_confirm_open),
+            ),
+            top=4,
+            left=4,
+            width=40,
+            height=5,
+        )
         self.terminal_window = Window(content=self.terminal_control, wrap_lines=False)
         self.picker_path_input = TextArea(
             text=str(self.picker_path),
@@ -373,14 +400,25 @@ class JumpServerTui:
     def history_entries(self) -> list[dict[str, Any]]:
         return self.history.sorted_entries()
 
+    def _compact_layout(self) -> bool:
+        try:
+            return get_app().output.get_size().columns < 110
+        except Exception:
+            return False
+
     def _layout(self) -> HSplit:
+        asset_window = Window(
+            content=self.asset_control,
+            width=D(preferred=68, min=42),
+            get_vertical_scroll=self._asset_vertical_scroll,
+        )
+        compact_asset_window = Window(
+            content=self.asset_control,
+            get_vertical_scroll=self._asset_vertical_scroll,
+        )
         body = VSplit(
             [
-                Window(
-                    content=self.asset_control,
-                    width=D(preferred=68, min=42),
-                    get_vertical_scroll=self._asset_vertical_scroll,
-                ),
+                asset_window,
                 Window(width=1, char="|", style="class:frame"),
                 HSplit(
                     [
@@ -392,6 +430,7 @@ class JumpServerTui:
             ],
             padding=1,
         )
+        compact_body = HSplit([compact_asset_window], padding=1)
         terminal_body = ConditionalContainer(
             Window(content=self.terminal_control, wrap_lines=False),
             filter=Condition(lambda: len(self.embedded_sessions) <= 1),
@@ -412,7 +451,14 @@ class JumpServerTui:
                 Window(content=FormattedTextControl(self._header_text), height=1, style="class:header"),
                 ConditionalContainer(self.search_input_window, filter=Condition(lambda: self.filter_mode)),
                 ConditionalContainer(self.search_status_window, filter=Condition(lambda: not self.filter_mode)),
-                ConditionalContainer(body, filter=Condition(lambda: self.view != "terminal")),
+                ConditionalContainer(
+                    ConditionalContainer(body, filter=Condition(lambda: not self._compact_layout())),
+                    filter=Condition(lambda: self.view != "terminal"),
+                ),
+                ConditionalContainer(
+                    ConditionalContainer(compact_body, filter=Condition(self._compact_layout)),
+                    filter=Condition(lambda: self.view != "terminal"),
+                ),
                 ConditionalContainer(
                     HSplit([terminal_body, multi_terminal_body]),
                     filter=Condition(lambda: self.view == "terminal"),
@@ -437,6 +483,7 @@ class JumpServerTui:
                 ),
                 self.context_menu_float,
                 self.session_menu_float,
+                self.terminate_confirm_float,
             ],
         )
 
@@ -556,6 +603,45 @@ class JumpServerTui:
             rows.append((style, f"  {item}\n"))
         return rows
 
+    def _terminate_confirm_text(self) -> FormattedText:
+        return FormattedText(
+            [
+                ("class:item.warn", "  Terminate all active sessions?\n"),
+                ("class:item", "  Yes, terminate\n"),
+                ("class:item", "  Cancel"),
+            ]
+        )
+
+    def _open_terminate_confirm(self) -> None:
+        self._close_session_menu()
+        self.terminate_confirm_open = True
+        try:
+            self.terminate_confirm_float.left = self.session_menu_float.left
+            self.terminate_confirm_float.top = self.session_menu_float.top
+        except Exception:
+            pass
+        self.status = "Confirm terminating all SSH sessions"
+        self._invalidate()
+
+    def _close_terminate_confirm(self) -> None:
+        self.terminate_confirm_open = False
+        self._invalidate()
+
+    def _confirm_terminate_all(self, confirmed: bool) -> None:
+        self._close_terminate_confirm()
+        if confirmed:
+            self._terminate_all_sessions()
+
+    def _terminate_confirm_mouse_handler(self, event: MouseEvent) -> None:
+        if event.event_type != MouseEventType.MOUSE_DOWN or event.button != MouseButton.LEFT:
+            return
+        # The first line is explanatory text; the following two rows are the
+        # clickable Yes/Cancel actions.
+        if event.position.y == 1:
+            self._confirm_terminate_all(True)
+        elif event.position.y == 2:
+            self._confirm_terminate_all(False)
+
     def _close_session_menu(self) -> None:
         self.session_menu_open = False
         self.session_menu_target = None
@@ -589,7 +675,7 @@ class JumpServerTui:
         if self.session_menu_index == 0:
             self._terminate_session(self.session_menu_target)
         elif self.session_menu_index == 1:
-            self._terminate_all_sessions()
+            self._open_terminate_confirm()
         self._close_session_menu()
 
     def _session_menu_mouse_handler(self, event: MouseEvent) -> None:
@@ -1252,6 +1338,12 @@ class JumpServerTui:
         )
         state = "●" if connected else " "
         data = asset_data(asset)
+        try:
+            compact = get_app().output.get_size().columns < 110
+        except Exception:
+            compact = False
+        if compact:
+            return f"{marker} {selection} {state} {asset_ip(asset)}  {asset_hostname(asset)}"
         platform = str(data.get("platform") or "?")
         protocol = ",".join(str(item) for item in data.get("protocols") or []) or "ssh/?"
         return f"{marker} {selection} {state} {asset_ip(asset):<16} {asset_hostname(asset)[:34]:<34} {platform:<7} {protocol}"
@@ -1320,6 +1412,9 @@ class JumpServerTui:
             if self.context_menu_open:
                 hint = "click action  Up/Down navigate  Enter select  Esc close"
                 return FormattedText([("class:item.muted", status + hint)])
+            if self.terminate_confirm_open:
+                hint = "click Yes/Cancel  Enter confirm  Esc cancel"
+                return FormattedText([("class:item.warn", status + hint)])
             if self.session_menu_open:
                 hint = "click action  Up/Down navigate  Enter select  Esc close"
                 return FormattedText([("class:item.muted", status + hint)])
@@ -1329,6 +1424,7 @@ class JumpServerTui:
                         ("class:item.muted", status),
                         ("class:footer.key", "r"), ("class:item.muted", " refresh  "),
                         ("class:footer.key", "q"), ("class:item.muted", " quit  "),
+                        ("class:footer.key", "x"), ("class:item.muted", " terminate  "),
                         ("class:footer.key", "n"), ("class:item.muted", " resources  "),
                         ("class:footer.key", "u/d"), ("class:item.muted", " transfer  "),
                         ("class:footer.key", "Esc"), ("class:item.muted", " cancel"),
@@ -1438,35 +1534,84 @@ class JumpServerTui:
             self._invalidate()
             return
         assets = [asset for asset in self.assets if str(asset.get("id") or "") in self.selected_asset_ids]
-        opened = 0
-        skipped = 0
-        anchor_index = len(self.embedded_sessions)
+        if not assets:
+            return
         self.selected_asset_ids.clear()
         self.batch_connecting = True
-        try:
-            for asset in assets:
-                try:
-                    users = self.client.system_users(str(asset["id"]))
-                except JumpCliError:
-                    skipped += 1
-                    continue
+        self._batch_pending = len(assets)
+        self._batch_opened = 0
+        self._batch_skipped = 0
+        self._batch_anchor_index = len(self.embedded_sessions)
+        self.view = "terminal"
+        self._focus_terminal()
+        self.status = f"Opening {len(assets)} SSH sessions"
+        self._invalidate()
+        for asset in assets:
+            self._request_batch_connection(asset)
+
+    def _request_batch_connection(self, asset: dict[str, Any]) -> None:
+        asset_id = str(asset.get("id") or "")
+
+        def request() -> None:
+            users: list[dict[str, Any]] = []
+            error = ""
+            try:
+                users = self.client.system_users(asset_id)
                 if len(users) != 1:
-                    skipped += 1
-                    continue
-                if self._run_ssh(asset, users[0]):
-                    opened += 1
-        finally:
-            self.batch_connecting = False
-        if opened and anchor_index < len(self.embedded_sessions):
-            self.active_session_index = anchor_index
-            self.embedded_session = self.embedded_sessions[anchor_index]
+                    error = "requires exactly one system user"
+                else:
+                    user = users[0]
+                    token = get_token_for_resolved(self.store, self.client, asset, user, quiet=True)
+                    self._from_session_thread(
+                        lambda: self._batch_connection_ready(asset, user, token, "")
+                    )
+                    return
+            except JumpCliError as exc:
+                error = str(exc)
+            self._from_session_thread(
+                lambda: self._batch_connection_ready(asset, {}, None, error)
+            )
+
+        threading.Thread(target=request, name="jumpcli-batch-ssh-auth", daemon=True).start()
+
+    def _batch_connection_ready(
+        self,
+        asset: dict[str, Any],
+        user: dict[str, Any],
+        token: str | None,
+        error: str,
+    ) -> None:
+        if error or token is None or not user:
+            self._batch_skipped += 1
+        else:
+            key = (str(asset.get("id") or ""), str(user.get("id") or ""))
+            duplicate = any(
+                existing.alive
+                and (getattr(existing, "asset_id", ""), getattr(existing, "system_user_id", "")) == key
+                for existing in self.embedded_sessions
+            )
+            if duplicate:
+                self._batch_skipped += 1
+            else:
+                self._start_embedded_ssh(asset, user, token)
+                self._batch_opened += 1
+        self._batch_pending -= 1
+        if self._batch_pending > 0:
+            self.status = f"Opening SSH sessions ({self._batch_pending} remaining)"
+            self._invalidate()
+            return
+        self.batch_connecting = False
+        if self._batch_opened and self._batch_anchor_index < len(self.embedded_sessions):
+            self.active_session_index = self._batch_anchor_index
+            self.embedded_session = self.embedded_sessions[self._batch_anchor_index]
             self.view = "terminal"
             self._focus_terminal()
-        if opened == 0:
+        elif not self.embedded_sessions:
             self.view = "assets"
             self.focus = "assets"
             self._focus_navigation()
-        self.status = f"Opened {opened} session(s)" + (f"; skipped {skipped}" if skipped else "")
+        suffix = f"; skipped {self._batch_skipped}" if self._batch_skipped else ""
+        self.status = f"Opened {self._batch_opened} session(s){suffix}"
         self._invalidate()
 
     def _invalidate(self) -> None:
@@ -1528,23 +1673,57 @@ class JumpServerTui:
         asset = self._selected_asset()
         if not asset:
             return
-        try:
-            self.users = self.client.system_users(str(asset["id"]))
-        except JumpCliError as exc:
-            self.last_error = str(exc)
+        asset_id = str(asset.get("id") or "")
+        if not asset_id or asset_id in self._pending_user_assets:
+            return
+        self._pending_user_assets.add(asset_id)
+        self.status = f"Loading system users: {asset_ip(asset)}"
+        self.last_error = ""
+        self._invalidate()
+
+        def request() -> None:
+            users: list[dict[str, Any]] = []
+            error = ""
+            try:
+                users = self.client.system_users(asset_id)
+            except JumpCliError as exc:
+                error = str(exc)
+            self._from_session_thread(lambda: self._asset_users_loaded(asset, users, error))
+
+        threading.Thread(target=request, name="jumpcli-system-users", daemon=True).start()
+
+    def _asset_users_loaded(
+        self,
+        asset: dict[str, Any],
+        users: list[dict[str, Any]],
+        error: str,
+    ) -> None:
+        asset_id = str(asset.get("id") or "")
+        self._pending_user_assets.discard(asset_id)
+        if error:
+            self.last_error = error
+            self.status = f"Unable to load users: {asset_ip(asset)}"
             self._invalidate()
             return
-        if not self.users:
+        if not users:
             self.last_error = "asset has no available system users"
+            self.status = f"No system users: {asset_ip(asset)}"
             self._invalidate()
             return
-        if len(self.users) == 1 and self.users[0].get("username") == "ops":
-            self.status = "Connecting with ops"
-            self._run_ssh(asset, self.users[0])
+        current = self._selected_asset()
+        if self.view != "assets" or not current or str(current.get("id") or "") != asset_id:
+            # The user moved on while the request was in flight. Keep the
+            # result available only to the originating action; do not switch
+            # the visible user pane underneath the new selection.
+            return
+        self.users = users
+        if len(users) == 1 and users[0].get("username") == "ops":
+            self.status = "Authenticating with ops"
+            self._run_ssh(asset, users[0])
             return
         self.view = "users"
         self.user_index = 0
-        self.status = f"{len(self.users)} system users available"
+        self.status = f"{len(users)} system users available"
         self._invalidate()
 
     def _connect_history(self) -> None:
@@ -1609,6 +1788,11 @@ class JumpServerTui:
                     self._focus_terminal()
                 self._invalidate()
                 return
+            if self.batch_connecting and self._batch_pending > 0:
+                self.embedded_session = None
+                self.status = f"Waiting for batch connections ({self._batch_pending} remaining)"
+                self._invalidate()
+                return
             self.embedded_session = None
             self.picker_open = False
             self.view = "assets"
@@ -1661,6 +1845,67 @@ class JumpServerTui:
         for session in list(self.embedded_sessions):
             session.stop()
 
+    def _start_embedded_ssh(
+        self,
+        asset: dict[str, Any],
+        user: dict[str, Any],
+        token: str,
+    ) -> None:
+        """Create the PTY only after background authentication succeeds."""
+        asset_id = str(asset.get("id") or "")
+        user_id = str(user.get("id") or "")
+        command = build_ssh_command(token, ssh_options=[], force_tty=True)
+        self.history.record(asset, user)
+        self.view = "terminal"
+        self.terminal_selection_anchor = None
+        self.terminal_selection_end = None
+        self.status = f"Opening SSH: {asset_ip(asset)}"
+        holder: dict[str, EmbeddedPtySession] = {}
+        dimensions = self._terminal_dimensions() or (120, 40)
+        session = EmbeddedPtySession(
+            command,
+            columns=dimensions[0],
+            lines=dimensions[1],
+            on_change=lambda: self._terminal_changed(holder["session"]),
+            on_zmodem=lambda direction: self._terminal_zmodem(holder["session"], direction),
+            on_exit=lambda code: self._terminal_exited(holder["session"], code),
+        )
+        holder["session"] = session
+        session.asset_id = asset_id
+        session.system_user_id = user_id
+        session.asset_label = f"{asset_ip(asset)} {asset_hostname(asset)}"
+        session.connection_status = "connecting"
+        self.embedded_sessions.append(session)
+        if not self.batch_connecting:
+            self.active_session_index = len(self.embedded_sessions) - 1
+            self.embedded_session = session
+        session.start()
+        if not self.batch_connecting:
+            self._focus_terminal()
+        self._invalidate()
+
+    def _authenticated_for_ssh(
+        self,
+        asset: dict[str, Any],
+        user: dict[str, Any],
+        token: str | None,
+        error: str,
+        return_to_assets: bool,
+    ) -> None:
+        key = (str(asset.get("id") or ""), str(user.get("id") or ""))
+        self._pending_connection_keys.discard(key)
+        if error or token is None:
+            self.last_error = error or "unable to obtain SSH token"
+            self.status = f"Authentication failed: {asset_ip(asset)}"
+            if return_to_assets:
+                self.view = "assets"
+                self.users = []
+                self.user_index = 0
+                self._focus_navigation()
+            self._invalidate()
+            return
+        self._start_embedded_ssh(asset, user, token)
+
     def _run_ssh(self, asset: dict[str, Any] | None, user: dict[str, Any]) -> bool:
         if not asset:
             return False
@@ -1682,41 +1927,28 @@ class JumpServerTui:
                     self._focus_terminal()
                     self._invalidate()
                     return True
-            try:
-                token = get_token_for_resolved(self.store, self.client, asset, user, quiet=True)
-            except JumpCliError as exc:
-                self.last_error = str(exc)
-                self._invalidate()
-                return False
-            command = build_ssh_command(token, ssh_options=[], force_tty=True)
-            self.history.record(asset, user)
+            key = (asset_id, user_id)
+            if key in self._pending_connection_keys:
+                return True
+            self._pending_connection_keys.add(key)
             self.view = "terminal"
             self.terminal_selection_anchor = None
             self.terminal_selection_end = None
-            self.status = f"Opening SSH: {asset_ip(asset)}"
-            holder: dict[str, EmbeddedPtySession] = {}
-            dimensions = self._terminal_dimensions() or (120, 40)
-            session = EmbeddedPtySession(
-                command,
-                columns=dimensions[0],
-                lines=dimensions[1],
-                on_change=lambda: self._terminal_changed(holder["session"]),
-                on_zmodem=lambda direction: self._terminal_zmodem(holder["session"], direction),
-                on_exit=lambda code: self._terminal_exited(holder["session"], code),
-            )
-            holder["session"] = session
-            session.asset_id = asset_id
-            session.system_user_id = user_id
-            session.asset_label = f"{asset_ip(asset)} {asset_hostname(asset)}"
-            session.connection_status = "connecting"
-            self.embedded_sessions.append(session)
-            if not self.batch_connecting:
-                self.active_session_index = len(self.embedded_sessions) - 1
-                self.embedded_session = session
-            session.start()
-            if not self.batch_connecting:
-                self._focus_terminal()
+            self.status = f"Authenticating: {asset_ip(asset)}"
             self._invalidate()
+
+            def authenticate() -> None:
+                token: str | None = None
+                error = ""
+                try:
+                    token = get_token_for_resolved(self.store, self.client, asset, user, quiet=True)
+                except JumpCliError as exc:
+                    error = str(exc)
+                self._from_session_thread(
+                    lambda: self._authenticated_for_ssh(asset, user, token, error, return_to_assets)
+                )
+
+            threading.Thread(target=authenticate, name="jumpcli-ssh-auth", daemon=True).start()
             return True
 
         def connect() -> None:
@@ -1756,6 +1988,7 @@ class JumpServerTui:
             lambda: self.view == "terminal" and not self.picker_open and self.focus == "terminal"
         )
         context_menu_active = Condition(lambda: self.context_menu_open)
+        terminate_confirm_active = Condition(lambda: self.terminate_confirm_open)
         session_focus = Condition(
             lambda: self.view == "terminal" and not self.picker_open and self.focus == "sessions"
         )
@@ -1774,6 +2007,8 @@ class JumpServerTui:
         def _escape(event: Any) -> None:
             if self.picker_open:
                 self._close_picker(cancel_transfer=True)
+            elif self.terminate_confirm_open:
+                self._close_terminate_confirm()
             elif self.session_menu_open:
                 self._close_session_menu()
             elif self.context_menu_open:
@@ -1923,6 +2158,10 @@ class JumpServerTui:
         def _session_enter(event: Any) -> None:
             self._leave_session_search()
 
+        @keys.add("c-w", filter=session_focus, eager=True)
+        def _session_terminate(event: Any) -> None:
+            self._terminate_active_session()
+
         @keys.add("backspace", filter=session_focus, eager=True)
         def _session_backspace(event: Any) -> None:
             self._session_search(self.session_search_query[:-1])
@@ -1966,6 +2205,20 @@ class JumpServerTui:
                 self._batch_connect_selected()
             else:
                 self._connect_current()
+
+        @keys.add("enter", filter=terminate_confirm_active, eager=True)
+        def _confirm_enter(event: Any) -> None:
+            self._confirm_terminate_all(True)
+
+        @keys.add("y", filter=terminate_confirm_active, eager=True)
+        @keys.add("Y", filter=terminate_confirm_active, eager=True)
+        def _confirm_yes(event: Any) -> None:
+            self._confirm_terminate_all(True)
+
+        @keys.add("n", filter=terminate_confirm_active, eager=True)
+        @keys.add("N", filter=terminate_confirm_active, eager=True)
+        def _confirm_no(event: Any) -> None:
+            self._confirm_terminate_all(False)
 
         @keys.add("c-u", eager=True)
         def _clear(event: Any) -> None:
