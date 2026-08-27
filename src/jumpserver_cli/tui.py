@@ -492,12 +492,27 @@ class JumpServerTui:
 
     def _header_text(self) -> FormattedText:
         auth = self.store.auth_mode()
+        if self.terminate_confirm_open:
+            mode = " CONFIRM "
+        elif self.picker_open:
+            mode = " FILE TRANSFER "
+        elif self.view == "terminal" and self.focus == "sessions":
+            mode = " SESSION LIST "
+        elif self.view == "terminal":
+            mode = " SSH SESSION "
+        elif self.view == "users":
+            mode = " SYSTEM USERS "
+        else:
+            mode = " ASSET CONSOLE "
+        base_url = self.args.base_url
+        if self._compact_layout():
+            base_url = urllib.parse.urlparse(base_url).netloc or base_url
         return FormattedText(
             [
                 ("class:header.brand", "  JUMPCLI "),
                 ("class:header.muted", " / "),
-                ("class:header.mode", " ASSET CONSOLE "),
-                ("class:header.muted", f"  {self.args.base_url}  auth:{auth}"),
+                ("class:header.mode", mode),
+                ("class:header.muted", f"  {base_url}  auth:{auth}"),
             ]
         )
 
@@ -1628,8 +1643,9 @@ class JumpServerTui:
         self.status = f"Opened {self._batch_opened} session(s){suffix}"
         self._invalidate()
 
-    def _invalidate(self) -> None:
-        self.last_error = ""
+    def _invalidate(self, *, clear_error: bool = True) -> None:
+        if clear_error:
+            self.last_error = ""
         with __import__("contextlib").suppress(Exception):
             get_app().invalidate()
 
@@ -1676,7 +1692,7 @@ class JumpServerTui:
         if error:
             self.last_error = error
             self.status = "Unable to refresh assets"
-            self._invalidate()
+            self._invalidate(clear_error=False)
             return
         self.assets = [item for item in assets if is_asset(item)]
         self.asset_index = 0
@@ -1739,12 +1755,12 @@ class JumpServerTui:
         if error:
             self.last_error = error
             self.status = f"Unable to load users: {asset_ip(asset)}"
-            self._invalidate()
+            self._invalidate(clear_error=False)
             return
         if not users:
             self.last_error = "asset has no available system users"
             self.status = f"No system users: {asset_ip(asset)}"
-            self._invalidate()
+            self._invalidate(clear_error=False)
             return
         current = self._selected_asset()
         if self.view != "assets" or not current or str(current.get("id") or "") != asset_id:
@@ -1938,7 +1954,7 @@ class JumpServerTui:
                 self.users = []
                 self.user_index = 0
                 self._focus_navigation()
-            self._invalidate()
+            self._invalidate(clear_error=False)
             return
         self._start_embedded_ssh(asset, user, token)
 
@@ -2001,7 +2017,7 @@ class JumpServerTui:
             except JumpCliError as exc:
                 self.last_error = str(exc)
             finally:
-                self._invalidate()
+                self._invalidate(clear_error=not bool(self.last_error))
 
         run_in_terminal(connect)
         # SSH may leave its output in the terminal after prompt_toolkit resumes.
