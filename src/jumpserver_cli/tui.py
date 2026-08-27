@@ -571,14 +571,57 @@ class JumpServerTui:
         return rows
 
     def _terminal_split_text(self, sessions: list[EmbeddedPtySession]) -> FormattedText:
-        left, right = sessions[0].display_snapshot(), sessions[1].display_snapshot()
+        left_lines, left_attrs, left_cursor = sessions[0].render_snapshot()
+        right_lines, right_attrs, right_cursor = sessions[1].render_snapshot()
         rows: FormattedText = []
-        width = max(20, max((len(line) for line in left), default=20))
-        for index in range(max(len(left), len(right))):
-            left_line = left[index] if index < len(left) else ""
-            right_line = right[index] if index < len(right) else ""
-            rows.append(("class:terminal", f"{left_line:<{width}} | {right_line}\n"))
+        width = max(20, max((len(line) for line in left_lines), default=20))
+        style_cache: dict[tuple[Any, ...], str] = {}
+        for index in range(max(len(left_lines), len(right_lines))):
+            left_line = left_lines[index] if index < len(left_lines) else ""
+            right_line = right_lines[index] if index < len(right_lines) else ""
+            left_attrs_row = left_attrs[index] if index < len(left_attrs) else ()
+            right_attrs_row = right_attrs[index] if index < len(right_attrs) else ()
+            left_active = self.embedded_session is sessions[0]
+            right_active = self.embedded_session is sessions[1]
+            left_fragments = (
+                self._terminal_render_line(index, left_line, left_attrs_row, left_cursor, style_cache)
+                if left_active
+                else self._terminal_render_colored_line(left_line, left_attrs_row, style_cache)
+            )
+            right_fragments = (
+                self._terminal_render_line(index, right_line, right_attrs_row, right_cursor, style_cache)
+                if right_active
+                else self._terminal_render_colored_line(right_line, right_attrs_row, style_cache)
+            )
+            rows.extend(left_fragments)
+            left_padding = max(0, width - len(left_line))
+            if left_padding:
+                rows.append(("class:terminal", " " * left_padding))
+            rows.append(("class:frame", " | "))
+            rows.extend(right_fragments)
+            rows.append(("class:terminal", "\n"))
         return rows
+
+    def _terminal_render_colored_line(
+        self,
+        line: str,
+        attrs: tuple[tuple[str, tuple[Any, ...]], ...],
+        style_cache: dict[tuple[Any, ...], str] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Render a split pane while keeping the remote terminal colors."""
+        if not line:
+            return [("class:terminal", "")]
+        fragments: list[tuple[str, str]] = []
+        begin = 0
+        current_style = self._terminal_char_style(attrs, 0, style_cache)
+        for column in range(1, len(line)):
+            style = self._terminal_char_style(attrs, column, style_cache)
+            if style != current_style:
+                fragments.append((current_style, line[begin:column]))
+                begin = column
+                current_style = style
+        fragments.append((current_style, line[begin:]))
+        return fragments
 
     def _terminal_cursor_position(self) -> Point:
         session = self.embedded_session

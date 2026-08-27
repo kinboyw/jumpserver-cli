@@ -65,6 +65,20 @@ class TuiLogicTests(unittest.TestCase):
         self.assertIn("10.0.0.1", row)
         self.assertIn("api-host", row)
 
+    def test_split_line_preserves_remote_color_runs(self):
+        tui = JumpServerTui.__new__(JumpServerTui)
+        default = ("default", "default", False, False, False, False, False, False)
+        green = ("green", "default", True, False, False, False, False, False)
+
+        fragments = tui._terminal_render_colored_line(
+            "abCde",
+            tuple((char, green if char == "C" else default) for char in "abCde"),
+            {},
+        )
+
+        self.assertEqual("".join(text for _, text in fragments), "abCde")
+        self.assertTrue(any("#00aa00" in style and text == "C" for style, text in fragments))
+
     def test_termination_marks_session_before_stop(self):
         class FakeSession:
             alive = True
