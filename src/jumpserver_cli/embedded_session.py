@@ -163,11 +163,27 @@ class EmbeddedPtySession:
                         char.blink,
                     )
                     chars.append((char.data, attrs))
+                self._repair_leading_color(chars)
                 _, removed = self._clean_display_line("".join(char for char, _ in chars))
                 if removed:
                     chars = chars[removed:]
                 rows.append(tuple(chars))
             return tuple(rows)
+
+    @staticmethod
+    def _repair_leading_color(chars: list[tuple[str, tuple[Any, ...]]]) -> None:
+        """Handle remote ``ll`` streams that apply color one character late."""
+        for index in range(1, len(chars) - 1):
+            previous_char, previous_attrs = chars[index - 1]
+            current_char, current_attrs = chars[index]
+            _, next_attrs = chars[index + 1]
+            if (
+                previous_char not in " \t"
+                and previous_attrs[0] == "default"
+                and current_attrs[0] != "default"
+                and current_attrs == next_attrs
+            ):
+                chars[index - 1] = (previous_char, current_attrs)
 
     def _clean_display_line(self, line: str) -> tuple[str, int]:
         """Hide a terminal title/prompt that JumpServer has echoed as text.
