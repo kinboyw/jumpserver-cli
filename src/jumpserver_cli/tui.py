@@ -587,7 +587,19 @@ class JumpServerTui:
         with __import__("contextlib").suppress(Exception):
             get_app().clipboard.set_data(ClipboardData(text))
         copied = False
-        for command in (("clip.exe",), ("/mnt/c/Windows/System32/clip.exe",), ("wl-copy",), ("pbcopy",)):
+        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        powershell_script = (
+            "$b=[Convert]::FromBase64String('" + encoded_text + "');"
+            "Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString($b))"
+        )
+        for command in (
+            ("powershell.exe", "-NoProfile", "-Command", powershell_script),
+            ("pwsh.exe", "-NoProfile", "-Command", powershell_script),
+            ("clip.exe",),
+            ("/mnt/c/Windows/System32/clip.exe",),
+            ("wl-copy",),
+            ("pbcopy",),
+        ):
             try:
                 subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1)
             except (FileNotFoundError, OSError, subprocess.SubprocessError):
@@ -614,8 +626,7 @@ class JumpServerTui:
         # OSC 52 is understood by modern terminal emulators and works even
         # when no clipboard helper is installed inside the host environment.
         with __import__("contextlib").suppress(Exception):
-            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-            get_app().output.write_raw(f"\033]52;c;{encoded}\a")
+            get_app().output.write_raw(f"\033]52;c;{encoded_text}\a")
             get_app().output.flush()
             copied = True
         self.status = "Selected text copied to system clipboard" if copied else "Unable to access system clipboard"
@@ -641,6 +652,8 @@ class JumpServerTui:
                 except (FileNotFoundError, OSError, subprocess.SubprocessError):
                     continue
                 text = result.stdout.decode("utf-8", errors="replace")
+                if "\ufffd" in text:
+                    text = result.stdout.decode("gb18030", errors="replace")
                 break
         if text:
             self._send_terminal(text.encode("utf-8"))
@@ -1255,8 +1268,7 @@ class JumpServerTui:
             self.active_session_index = len(self.embedded_sessions) - 1
             self.embedded_session = session
             session.start()
-            with __import__("contextlib").suppress(Exception):
-                get_app().layout.focus(self.terminal_control)
+            self._focus_terminal()
             self._invalidate()
             return
 
