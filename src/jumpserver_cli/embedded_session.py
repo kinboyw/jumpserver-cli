@@ -127,6 +127,10 @@ class EmbeddedPtySession:
         with self._lock:
             return tuple(self.screen.display)
 
+    def cursor_snapshot(self) -> tuple[int, int, bool]:
+        with self._lock:
+            return self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
+
     def start_transfer(self, command: list[str], *, cwd: str | None = None) -> None:
         with self._lock:
             if self.master_fd is None or self.transfer_process is not None:

@@ -72,6 +72,7 @@ STYLE = Style.from_dict(
         "item.warn": "#ffa657 bold",
         "terminal": "#f0f6fc",
         "terminal.selected": "bg:#264f78 #ffffff",
+        "terminal.cursor": "bg:#f0f6fc #0a0e14",
         "error": "#ff7b72 bold",
         "detail.label": "#8b949e",
         "detail.value": "#f0f6fc",
@@ -413,7 +414,8 @@ class JumpServerTui:
         session = self.embedded_session
         if session is None:
             return Point(x=0, y=0)
-        return Point(x=session.screen.cursor.x, y=session.screen.cursor.y)
+        x, y, _ = session.cursor_snapshot()
+        return Point(x=x, y=y)
 
     def _session_cursor_position(self) -> Point:
         return Point(x=0, y=self.active_session_index + 1)
@@ -533,15 +535,22 @@ class JumpServerTui:
         fragments: list[tuple[str, str]] = []
         if not line:
             return [("class:terminal", "")]
+        session = self.embedded_session
+        cursor_x, cursor_y, cursor_hidden = session.cursor_snapshot() if session else (-1, -1, True)
         begin = 0
         selected = self._terminal_is_selected(row, 0)
+        cursor = not cursor_hidden and row == cursor_y and cursor_x == 0
         for column in range(1, len(line) + 1):
             current = column < len(line) and self._terminal_is_selected(row, column)
-            if current != selected:
-                fragments.append(("class:terminal.selected" if selected else "class:terminal", line[begin:column]))
+            current_cursor = not cursor_hidden and row == cursor_y and column == cursor_x
+            if current != selected or current_cursor != cursor:
+                style = "class:terminal.cursor" if cursor else "class:terminal.selected" if selected else "class:terminal"
+                fragments.append((style, line[begin:column]))
                 begin = column
                 selected = current
-        fragments.append(("class:terminal.selected" if selected else "class:terminal", line[begin:]))
+                cursor = current_cursor
+        style = "class:terminal.cursor" if cursor else "class:terminal.selected" if selected else "class:terminal"
+        fragments.append((style, line[begin:]))
         return fragments
 
     def _terminal_mouse_handler(self, event: MouseEvent) -> None:
@@ -580,6 +589,23 @@ class JumpServerTui:
             break
         self.status = "Selected text copied" if copied else "Selected text copied to TUI clipboard"
         self._invalidate()
+
+    def _paste_terminal_clipboard(self) -> None:
+        if self.embedded_session is None or self.picker_open:
+            return
+        text = ""
+        with __import__("contextlib").suppress(Exception):
+            text = get_app().clipboard.get_data().text
+        if not text:
+            for command in (("wl-paste", "--no-newline"), ("xclip", "-selection", "clipboard", "-o"), ("xsel", "--clipboard", "--output"), ("pbpaste",)):
+                try:
+                    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=1)
+                except (FileNotFoundError, OSError, subprocess.SubprocessError):
+                    continue
+                text = result.stdout.decode("utf-8", errors="replace")
+                break
+        if text:
+            self._send_terminal(text.encode("utf-8"))
 
     def _sync_terminal_size(self, sessions: list[EmbeddedPtySession]) -> None:
         """Keep pyte and the child SSH PTY aligned with the visible pane."""
@@ -1226,7 +1252,10 @@ class JumpServerTui:
 
         @keys.add("c-c", filter=terminal_input_active, eager=True)
         def _terminal_interrupt(event: Any) -> None:
-            self._send_terminal(b"\x03")
+            if self._terminal_selection_text():
+                self._copy_terminal_selection()
+            else:
+                self._send_terminal(b"\x03")
 
         @keys.add("c-c", filter=picker_active, eager=True)
         def _picker_cancel(event: Any) -> None:
@@ -1302,12 +1331,12 @@ class JumpServerTui:
             self._picker_move(1)
 
         @keys.add("down", filter=navigating, eager=True)
-        @keys.add("j", filter=Condition(lambda: not self.filter_mode and self.focus != "assets"), eager=True)
+        @keys.add("j", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and self.focus != "assets"), eager=True)
         def _down(event: Any) -> None:
             self._move(1)
 
         @keys.add("up", filter=navigating, eager=True)
-        @keys.add("k", filter=Condition(lambda: not self.filter_mode and self.focus != "assets"), eager=True)
+        @keys.add("k", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and self.focus != "assets"), eager=True)
         def _up(event: Any) -> None:
             self._move(-1)
 
@@ -1376,9 +1405,31 @@ class JumpServerTui:
         def _copy_selection(event: Any) -> None:
             self._copy_terminal_selection()
 
+        @keys.add("c-v", filter=terminal_input_active, eager=True)
+        def _paste_selection(event: Any) -> None:
+            self._paste_terminal_clipboard()
+
         @keys.add("c-insert", filter=terminal_input_active, eager=True)
         def _copy_selection_insert(event: Any) -> None:
             self._copy_terminal_selection()
+
+        @keys.add("c-w", filter=terminal_input_active, eager=True)
+        def _terminal_word_erase(event: Any) -> None:
+            self._send_terminal(b"\x17")
+
+        @keys.add("c-l", filter=terminal_input_active, eager=True)
+        def _terminal_clear(event: Any) -> None:
+            self._send_terminal(b"\x0c")
+
+        handled_controls = {"c-c", "c-v", "c-w", "c-l", "c-u", "c-n", "c-y"}
+        for letter in "abcdefghijklmnopqrstuvwxyz":
+            key_name = f"c-{letter}"
+            if key_name in handled_controls:
+                continue
+
+            @keys.add(key_name, filter=terminal_input_active, eager=True)
+            def _terminal_control(event: Any, value: str = letter) -> None:
+                self._send_terminal(bytes((ord(value) - ord("a") + 1,)))
 
         @keys.add("up", filter=terminal_input_active, eager=True)
         def _terminal_up(event: Any) -> None:
@@ -1433,7 +1484,7 @@ class JumpServerTui:
             self._stop_embedded_sessions()
             event.app.exit(result=0)
 
-        @keys.add("r", filter=Condition(lambda: not self.filter_mode and self.focus != "assets"), eager=True)
+        @keys.add("r", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and self.focus != "assets"), eager=True)
         def _reload(event: Any) -> None:
             self._reload()
 
