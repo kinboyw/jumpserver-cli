@@ -227,6 +227,7 @@ class JumpServerTui:
         self.users: list[dict[str, Any]] = []
         self._pending_user_assets: set[str] = set()
         self._pending_connection_keys: set[tuple[str, str]] = set()
+        self._reload_pending = False
         self.status = "Ready"
         self.last_error = ""
         self.embedded_sessions: list[EmbeddedPtySession] = []
@@ -1639,12 +1640,34 @@ class JumpServerTui:
         self._invalidate()
 
     def _reload(self) -> None:
-        try:
-            self.assets = [item for item in self.client.assets_tree("") if is_asset(item)]
-            self.asset_index = 0
-            self.status = f"Loaded {len(self.assets)} assets"
-        except JumpCliError as exc:
-            self.last_error = str(exc)
+        if self._reload_pending:
+            return
+        self._reload_pending = True
+        self.last_error = ""
+        self.status = "Refreshing assets"
+        self._invalidate()
+
+        def request() -> None:
+            assets: list[dict[str, Any]] = []
+            error = ""
+            try:
+                assets = self.client.assets_tree("")
+            except JumpCliError as exc:
+                error = str(exc)
+            self._from_session_thread(lambda: self._reload_finished(assets, error))
+
+        threading.Thread(target=request, name="jumpcli-assets-refresh", daemon=True).start()
+
+    def _reload_finished(self, assets: list[dict[str, Any]], error: str) -> None:
+        self._reload_pending = False
+        if error:
+            self.last_error = error
+            self.status = "Unable to refresh assets"
+            self._invalidate()
+            return
+        self.assets = [item for item in assets if is_asset(item)]
+        self.asset_index = 0
+        self.status = f"Loaded {len(self.assets)} assets"
         self._invalidate()
 
     def _begin_search(self) -> None:
