@@ -170,6 +170,46 @@ class EmbeddedPtySession:
                 rows.append(tuple(chars))
             return tuple(rows)
 
+    def render_snapshot(
+        self,
+    ) -> tuple[
+        tuple[str, ...],
+        tuple[tuple[tuple[str, tuple[Any, ...]], ...], ...],
+        tuple[int, int, bool],
+    ]:
+        """Return text, attributes, and cursor from one consistent screen frame."""
+        with self._lock:
+            lines: list[str] = []
+            rows: list[tuple[tuple[str, tuple[Any, ...]], ...]] = []
+            for row in range(self.screen.lines):
+                raw_line = self.screen.display[row]
+                cleaned_line, removed = self._clean_display_line(raw_line)
+                lines.append(cleaned_line)
+                chars = []
+                for column in range(self.screen.columns):
+                    char = self.screen.buffer[row][column]
+                    attrs = (
+                        char.fg,
+                        char.bg,
+                        char.bold,
+                        char.italics,
+                        char.underscore,
+                        char.strikethrough,
+                        char.reverse,
+                        char.blink,
+                    )
+                    chars.append((char.data, attrs))
+                self._repair_leading_color(chars)
+                if removed:
+                    chars = chars[removed:]
+                rows.append(tuple(chars))
+
+            x, y, hidden = self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
+            if 0 <= y < self.screen.lines:
+                _, removed = self._clean_display_line(self.screen.display[y])
+                x = max(0, x - removed)
+            return tuple(lines), tuple(rows), (x, y, hidden)
+
     @staticmethod
     def _repair_leading_color(chars: list[tuple[str, tuple[Any, ...]]]) -> None:
         """Handle remote ``ll`` streams that apply color one character late."""

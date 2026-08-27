@@ -541,9 +541,7 @@ class JumpServerTui:
         if session is None:
             return FormattedText([("class:item.muted", "SSH session is not running")])
         rows: FormattedText = []
-        lines = session.display_snapshot()
-        styled = session.styled_snapshot()
-        cursor = session.cursor_snapshot()
+        lines, styled, cursor = session.render_snapshot()
         style_cache: dict[tuple[Any, ...], str] = {}
         for row, line in enumerate(lines):
             attrs = styled[row] if row < len(styled) else ()
