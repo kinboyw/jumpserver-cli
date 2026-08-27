@@ -1103,7 +1103,8 @@ class JumpServerTui:
                     ("class:footer.key", "F3"), ("class:item.muted", " split  "),
                     ("class:footer.key", "F4/Ctrl-N"), ("class:item.muted", " resources  "),
                     ("class:footer.key", "F6/Tab"), ("class:item.muted", " focus sessions  "),
-                    ("class:footer.key", "Ctrl-Y"), ("class:item.muted", " copy selection  "),
+                    ("class:footer.key", "Ctrl-Insert"), ("class:item.muted", " copy selection  "),
+                    ("class:footer.key", "Shift-Insert"), ("class:item.muted", " paste  "),
                     ("class:footer.key", "PgUp/PgDn"), ("class:item.muted", " scrollback  "),
                     ("class:footer.key", "Ctrl-X"), ("class:item.muted", " r refresh  q quit  n resources  u/d transfer"),
                 ]
@@ -1581,15 +1582,11 @@ class JumpServerTui:
                 self.search_input.buffer.text = ""
                 self._invalidate()
 
-        @keys.add("c-y", filter=terminal_input_active, eager=True)
-        def _copy_selection(event: Any) -> None:
-            self._copy_terminal_selection()
-
-        @keys.add("c-v", filter=terminal_input_active, eager=True)
+        @keys.add(Keys.ShiftInsert, filter=terminal_input_active, eager=True)
         def _paste_selection(event: Any) -> None:
             self._paste_terminal_clipboard()
 
-        @keys.add("c-insert", filter=terminal_input_active, eager=True)
+        @keys.add(Keys.ControlInsert, filter=terminal_input_active, eager=True)
         def _copy_selection_insert(event: Any) -> None:
             self._copy_terminal_selection()
 
@@ -1601,7 +1598,7 @@ class JumpServerTui:
         def _terminal_clear(event: Any) -> None:
             self._send_terminal(b"\x0c")
 
-        handled_controls = {"c-v", "c-w", "c-l", "c-u", "c-n", "c-y"}
+        handled_controls = {"c-w", "c-l", "c-u", "c-n"}
         for letter in "abcdefghijklmnopqrstuvwxyz":
             key_name = f"c-{letter}"
             if key_name in handled_controls:
