@@ -179,12 +179,12 @@ class EmbeddedPtySession:
     ]:
         """Return text, attributes, and cursor from one consistent screen frame."""
         with self._lock:
-            lines: list[str] = []
-            rows: list[tuple[tuple[str, tuple[Any, ...]], ...]] = []
+            # Keep the critical section limited to copying pyte's mutable
+            # state. Formatting a large screen while holding this lock makes
+            # keyboard writes wait behind `ll`, `top`, or build output.
+            raw_lines = tuple(self.screen.display)
+            raw_rows = []
             for row in range(self.screen.lines):
-                raw_line = self.screen.display[row]
-                cleaned_line, removed = self._clean_display_line(raw_line)
-                lines.append(cleaned_line)
                 chars = []
                 for column in range(self.screen.columns):
                     char = self.screen.buffer[row][column]
@@ -199,15 +199,22 @@ class EmbeddedPtySession:
                         char.blink,
                     )
                     chars.append((char.data, attrs))
-                self._repair_leading_color(chars)
-                if removed:
-                    chars = chars[removed:]
-                rows.append(tuple(chars))
-
+                raw_rows.append(tuple(chars))
             x, y, hidden = self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
-            if 0 <= y < self.screen.lines:
-                _, removed = self._clean_display_line(self.screen.display[y])
-                x = max(0, x - removed)
+
+        lines: list[str] = []
+        rows: list[tuple[tuple[str, tuple[Any, ...]], ...]] = []
+        for raw_line, raw_chars in zip(raw_lines, raw_rows):
+            cleaned_line, removed = self._clean_display_line(raw_line)
+            lines.append(cleaned_line)
+            chars = list(raw_chars)
+            self._repair_leading_color(chars)
+            if removed:
+                chars = chars[removed:]
+            rows.append(tuple(chars))
+        if 0 <= y < len(raw_lines):
+            _, removed = self._clean_display_line(raw_lines[y])
+            x = max(0, x - removed)
             return tuple(lines), tuple(rows), (x, y, hidden)
 
     @staticmethod
