@@ -131,6 +131,35 @@ class TuiLogicTests(unittest.TestCase):
         self.assertFalse(tui.embedded_sessions)
         self.assertEqual(tui.view, "assets")
 
+    def test_retry_last_action_reselects_failed_asset(self):
+        asset = {
+            "id": "asset-1",
+            "title": "10.0.0.1",
+            "meta": {"data": {"ip": "10.0.0.1", "hostname": "api-host"}},
+        }
+        tui = JumpServerTui.__new__(JumpServerTui)
+        tui.retry_asset = asset
+        tui.retry_user = None
+        tui.last_error = "lookup failed"
+        tui.users = [{"id": "stale"}]
+        tui.user_index = 2
+        tui.view = "users"
+        tui.focus = "history"
+        tui.assets = [asset]
+        tui.query = "api"
+        tui.asset_index = 0
+        tui._focus_navigation = lambda: None
+        tui._invalidate = lambda **kwargs: None
+        tui._select_asset = lambda: setattr(tui, "retried", True)
+
+        tui._retry_last_action()
+
+        self.assertEqual(tui.view, "assets")
+        self.assertEqual(tui.focus, "assets")
+        self.assertEqual(tui.users, [])
+        self.assertTrue(tui.retried)
+        self.assertEqual(tui.asset_index, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

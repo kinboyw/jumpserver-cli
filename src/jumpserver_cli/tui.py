@@ -234,6 +234,8 @@ class JumpServerTui:
         self._terminal_redraw_pending = False
         self.status = "Ready"
         self.last_error = ""
+        self.retry_asset: dict[str, Any] | None = None
+        self.retry_user: dict[str, Any] | None = None
         self.embedded_sessions: list[EmbeddedPtySession] = []
         self.embedded_session: EmbeddedPtySession | None = None
         self.active_session_index = 0
@@ -245,6 +247,7 @@ class JumpServerTui:
         self._batch_anchor_index = 0
         self._pending_batch_assets: set[str] = set()
         self._batch_request_timers: dict[str, threading.Timer] = {}
+        self._batch_failed_assets: dict[str, tuple[dict[str, Any], str]] = {}
         self.terminal_command_prefix = False
         self.context_menu_open = False
         self.context_menu_index = 0
@@ -1490,7 +1493,9 @@ class JumpServerTui:
 
     def _footer_text(self) -> FormattedText:
         if self.last_error:
-            return FormattedText([("class:error", f"  ERROR: {self.last_error}")])
+            hint = "Ctrl-R retry  Ctrl-Q/C quit" if self.view != "terminal" else ""
+            suffix = f"  |  {hint}" if hint else ""
+            return FormattedText([("class:error", f"  ERROR: {self.last_error}{suffix}")])
         if self.status:
             status = f"  {self.status}  |  "
         else:
@@ -1642,6 +1647,7 @@ class JumpServerTui:
         self._batch_pending = len(assets)
         self._batch_opened = 0
         self._batch_skipped = 0
+        self._batch_failed_assets = {}
         self._batch_anchor_index = len(self.embedded_sessions)
         self.view = "terminal"
         self._focus_terminal()
@@ -1712,6 +1718,10 @@ class JumpServerTui:
             timer.cancel()
         if error or token is None or not user:
             self._batch_skipped += 1
+            self._batch_failed_assets[asset_id] = (
+                asset,
+                error or "unable to obtain SSH token",
+            )
         else:
             key = (str(asset.get("id") or ""), str(user.get("id") or ""))
             duplicate = any(
@@ -1721,6 +1731,7 @@ class JumpServerTui:
             )
             if duplicate:
                 self._batch_skipped += 1
+                self._batch_failed_assets[asset_id] = (asset, "session is already open")
             else:
                 self._start_embedded_ssh(asset, user, token)
                 self._batch_opened += 1
@@ -1741,7 +1752,12 @@ class JumpServerTui:
             self._focus_navigation()
         suffix = f"; skipped {self._batch_skipped}" if self._batch_skipped else ""
         self.status = f"Opened {self._batch_opened} session(s){suffix}"
-        self._invalidate()
+        if self._batch_failed_assets:
+            first_failed = next(iter(self._batch_failed_assets.values()))
+            self.retry_asset, self.retry_user = first_failed[0], None
+            failed = ", ".join(asset_ip(item[0]) for item in self._batch_failed_assets.values())
+            self.last_error = f"Batch failures: {failed} (Ctrl-R to retry one by one)"
+        self._invalidate(clear_error=not bool(self.last_error))
 
     def _invalidate(self, *, clear_error: bool = True) -> None:
         if clear_error:
@@ -1829,6 +1845,8 @@ class JumpServerTui:
         if not asset_id or asset_id in self._pending_user_assets:
             return
         self._pending_user_assets.add(asset_id)
+        self.retry_asset = asset
+        self.retry_user = None
         self.status = f"Loading system users: {asset_ip(asset)}"
         self.last_error = ""
         self._invalidate()
@@ -1877,11 +1895,15 @@ class JumpServerTui:
         if timer is not None:
             timer.cancel()
         if error:
+            self.retry_asset = asset
+            self.retry_user = None
             self.last_error = error
             self.status = f"Unable to load users: {asset_ip(asset)}"
             self._invalidate(clear_error=False)
             return
         if not users:
+            self.retry_asset = asset
+            self.retry_user = None
             self.last_error = "asset has no available system users"
             self.status = f"No system users: {asset_ip(asset)}"
             self._invalidate(clear_error=False)
@@ -1915,6 +1937,30 @@ class JumpServerTui:
         }
         user = {"id": entry.get("system_user_id"), "name": entry.get("system_user"), "username": entry.get("username")}
         self._run_ssh(asset, user)
+
+    def _retry_last_action(self) -> None:
+        """Retry the last user lookup or SSH authentication request."""
+        asset = self.retry_asset
+        user = self.retry_user
+        if not asset:
+            self._reload()
+            return
+        self.last_error = ""
+        self.users = []
+        self.user_index = 0
+        self.view = "assets"
+        self.focus = "assets"
+        for index, candidate in enumerate(self.filtered_assets):
+            if str(candidate.get("id") or "") == str(asset.get("id") or ""):
+                self.asset_index = index
+                break
+        self._focus_navigation()
+        if user:
+            self.status = f"Retrying SSH authentication: {asset_ip(asset)}"
+            self._run_ssh(asset, user)
+        else:
+            self.status = f"Retrying system-user lookup: {asset_ip(asset)}"
+            self._select_asset()
 
     def _connect_current(self) -> None:
         if self.view == "terminal":
@@ -2096,6 +2142,8 @@ class JumpServerTui:
         if timer is not None:
             timer.cancel()
         if error or token is None:
+            self.retry_asset = asset
+            self.retry_user = user
             self.last_error = error or "unable to obtain SSH token"
             self.status = f"Authentication failed: {asset_ip(asset)}"
             if return_to_assets:
@@ -2581,6 +2629,13 @@ class JumpServerTui:
             @keys.add(char, filter=session_typing, eager=True)
             def _session_type(event: Any, value: str = char) -> None:
                 self._session_search(self.session_search_query + value)
+
+        @keys.add("c-r", filter=Condition(lambda: self.view != "terminal" and not self.picker_open), eager=True)
+        def _refresh_or_retry(event: Any) -> None:
+            if self.last_error and self.retry_asset is not None:
+                self._retry_last_action()
+            else:
+                self._reload()
 
         @keys.add("c-q", filter=Condition(lambda: not self.picker_open), eager=True)
         def _quit_key(event: Any) -> None:

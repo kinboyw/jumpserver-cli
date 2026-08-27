@@ -70,6 +70,13 @@ building the embedded SSH TUI. Read it before changing `tui.py` or
 - Every background user/token request needs a visible timeout and must ignore
   late results after timeout or cancellation. A cancelled request must not
   create a session when its worker eventually returns.
+- Keep failed user lookups and SSH authentication requests retryable from the
+  current resource view. `Ctrl-R` retries the failed action when one exists;
+  otherwise it refreshes the asset tree. Do not make users repeat navigation
+  just to recover from a transient API or network error.
+- Batch connection failures should retain the failed asset labels and expose
+  which resources failed. A single aggregate count is not enough to diagnose
+  or recover a partial batch.
 
 ## Regression Checklist
 
