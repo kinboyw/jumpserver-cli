@@ -454,7 +454,12 @@ class JumpServerTui:
         multi_terminal_body = ConditionalContainer(
             VSplit(
                 [
-                    Window(content=self.session_control, width=D(preferred=34, min=24)),
+                    Window(
+                        content=self.session_control,
+                        width=D(preferred=34, min=24),
+                        wrap_lines=False,
+                        get_vertical_scroll=self._session_vertical_scroll,
+                    ),
                     Window(width=1, char="|", style="class:frame"),
                     Window(content=self.terminal_control, wrap_lines=False),
                 ],
@@ -582,8 +587,17 @@ class JumpServerTui:
     def _session_cursor_position(self) -> Point:
         return Point(x=0, y=self.active_session_index + 1)
 
+    def _session_vertical_scroll(self, window: Window) -> int:
+        render_info = window.render_info
+        height = render_info.window_height if render_info else 0
+        if height <= 0:
+            return 0
+        return max(0, self._session_cursor_position().y - height + 1)
+
     def _session_list_text(self) -> FormattedText:
         title = " ACTIVE SESSIONS"
+        if self.batch_connecting:
+            title += f"  OPENING:{self._batch_opened}/{self._batch_opened + self._batch_pending}"
         if self.focus == "sessions":
             title += f"  FIND: {self.session_search_query}_"
         rows: FormattedText = [("class:frame.focused", title + "\n")]
