@@ -703,28 +703,49 @@ class JumpServerTui:
     def _paste_terminal_clipboard(self) -> None:
         if self.embedded_session is None or self.picker_open:
             return
-        text = ""
-        with __import__("contextlib").suppress(Exception):
-            text = get_app().clipboard.get_data().text
+        # In WSL, prompt-toolkit's in-memory clipboard is not necessarily the
+        # same clipboard as Windows. Read the host clipboard first, then use
+        # the TUI clipboard as a fallback for native Linux/macOS terminals.
+        text = self._read_system_clipboard()
         if not text:
-            for command in (
-                ("powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"),
-                ("pwsh.exe", "-NoProfile", "-Command", "Get-Clipboard"),
-                ("wl-paste", "--no-newline"),
-                ("xclip", "-selection", "clipboard", "-o"),
-                ("xsel", "--clipboard", "--output"),
-                ("pbpaste",),
-            ):
-                try:
-                    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=1)
-                except (FileNotFoundError, OSError, subprocess.SubprocessError):
-                    continue
-                text = result.stdout.decode("utf-8", errors="replace")
-                if "\ufffd" in text:
-                    text = result.stdout.decode("gb18030", errors="replace")
-                break
+            with __import__("contextlib").suppress(Exception):
+                text = get_app().clipboard.get_data().text
         if text:
-            self._send_terminal(text.encode("utf-8"))
+            self._send_terminal(text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8"))
+
+    @staticmethod
+    def _read_system_clipboard() -> str:
+        """Read clipboard text across WSL, Linux, and macOS hosts."""
+        powershell_script = (
+            "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new();"
+            "Get-Clipboard -Raw"
+        )
+        for command in (
+            ("powershell.exe", "-NoProfile", "-Command", powershell_script),
+            ("pwsh.exe", "-NoProfile", "-Command", powershell_script),
+            ("wl-paste", "--no-newline"),
+            ("xclip", "-selection", "clipboard", "-o"),
+            ("xsel", "--clipboard", "--output"),
+            ("pbpaste",),
+        ):
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    check=True,
+                    timeout=1,
+                )
+            except (FileNotFoundError, OSError, subprocess.SubprocessError):
+                continue
+            raw = result.stdout
+            text = raw.decode("utf-8", errors="replace")
+            if "\ufffd" in text or "\x00" in text:
+                text = raw.decode("utf-16", errors="replace")
+            if "\ufffd" in text:
+                text = raw.decode("gb18030", errors="replace")
+            return text
+        return ""
 
     def _sync_terminal_size(self, sessions: list[EmbeddedPtySession]) -> None:
         """Keep pyte and the child SSH PTY aligned with the visible pane."""
