@@ -64,6 +64,7 @@ ANSI_SEQUENCES["\x1b[27;5;2~"] = Keys.ControlInsert
 
 HISTORY_PATH = Path.home() / ".local" / "state" / "jumpserver-cli" / "history.json"
 MAX_HISTORY = 60
+MIN_TUI_REQUEST_TIMEOUT = 5
 
 STYLE = Style.from_dict(
     {
@@ -226,7 +227,9 @@ class JumpServerTui:
         self.history_index = 0
         self.users: list[dict[str, Any]] = []
         self._pending_user_assets: set[str] = set()
+        self._user_request_timers: dict[str, threading.Timer] = {}
         self._pending_connection_keys: set[tuple[str, str]] = set()
+        self._connection_request_timers: dict[tuple[str, str], threading.Timer] = {}
         self._reload_pending = False
         self._terminal_redraw_pending = False
         self.status = "Ready"
@@ -240,6 +243,8 @@ class JumpServerTui:
         self._batch_opened = 0
         self._batch_skipped = 0
         self._batch_anchor_index = 0
+        self._pending_batch_assets: set[str] = set()
+        self._batch_request_timers: dict[str, threading.Timer] = {}
         self.terminal_command_prefix = False
         self.context_menu_open = False
         self.context_menu_index = 0
@@ -407,6 +412,13 @@ class JumpServerTui:
             return get_app().output.get_size().columns < 110
         except Exception:
             return False
+
+    def _request_timeout_seconds(self) -> float:
+        value = getattr(self.args, "timeout", 20)
+        try:
+            return max(MIN_TUI_REQUEST_TIMEOUT, min(120, float(value)))
+        except (TypeError, ValueError):
+            return 20.0
 
     def _layout(self) -> HSplit:
         asset_window = Window(
@@ -691,7 +703,26 @@ class JumpServerTui:
         self._invalidate()
 
     def _terminate_active_session(self) -> None:
-        self._terminate_session(self.embedded_session)
+        if self.embedded_session is not None:
+            self._terminate_session(self.embedded_session)
+            return
+        if self._pending_connection_keys:
+            self._cancel_pending_connections()
+
+    def _cancel_pending_connections(self) -> None:
+        pending = list(self._pending_connection_keys)
+        for key in pending:
+            self._pending_connection_keys.discard(key)
+            timer = self._connection_request_timers.pop(key, None)
+            if timer is not None:
+                timer.cancel()
+        if pending:
+            self.view = "assets"
+            self.users = []
+            self.user_index = 0
+            self.status = "SSH connection cancelled"
+            self._focus_navigation()
+            self._invalidate()
 
     def _terminate_all_sessions(self) -> None:
         sessions = list(self.embedded_sessions)
@@ -1607,6 +1638,7 @@ class JumpServerTui:
 
     def _request_batch_connection(self, asset: dict[str, Any]) -> None:
         asset_id = str(asset.get("id") or "")
+        self._pending_batch_assets.add(asset_id)
 
         def request() -> None:
             users: list[dict[str, Any]] = []
@@ -1628,7 +1660,27 @@ class JumpServerTui:
                 lambda: self._batch_connection_ready(asset, {}, None, error)
             )
 
+        timer = threading.Timer(
+            self._request_timeout_seconds(),
+            lambda: self._from_session_thread(
+                lambda: self._batch_connection_timed_out(asset)
+            ),
+        )
+        timer.daemon = True
+        self._batch_request_timers[asset_id] = timer
+        timer.start()
         threading.Thread(target=request, name="jumpcli-batch-ssh-auth", daemon=True).start()
+
+    def _batch_connection_timed_out(self, asset: dict[str, Any]) -> None:
+        asset_id = str(asset.get("id") or "")
+        if asset_id not in self._pending_batch_assets:
+            return
+        self._batch_connection_ready(
+            asset,
+            {},
+            None,
+            f"timed out opening {asset_ip(asset)}",
+        )
 
     def _batch_connection_ready(
         self,
@@ -1637,6 +1689,13 @@ class JumpServerTui:
         token: str | None,
         error: str,
     ) -> None:
+        asset_id = str(asset.get("id") or "")
+        if asset_id not in self._pending_batch_assets:
+            return
+        self._pending_batch_assets.discard(asset_id)
+        timer = self._batch_request_timers.pop(asset_id, None)
+        if timer is not None:
+            timer.cancel()
         if error or token is None or not user:
             self._batch_skipped += 1
         else:
@@ -1769,7 +1828,26 @@ class JumpServerTui:
                 error = str(exc)
             self._from_session_thread(lambda: self._asset_users_loaded(asset, users, error))
 
+        timer = threading.Timer(
+            self._request_timeout_seconds(),
+            lambda: self._from_session_thread(lambda: self._asset_users_timed_out(asset)),
+        )
+        timer.daemon = True
+        self._user_request_timers[asset_id] = timer
+        timer.start()
         threading.Thread(target=request, name="jumpcli-system-users", daemon=True).start()
+
+    def _asset_users_timed_out(self, asset: dict[str, Any]) -> None:
+        asset_id = str(asset.get("id") or "")
+        if asset_id not in self._pending_user_assets:
+            return
+        self._pending_user_assets.discard(asset_id)
+        timer = self._user_request_timers.pop(asset_id, None)
+        if timer is not None:
+            timer.cancel()
+        self.last_error = f"timed out loading system users for {asset_ip(asset)}"
+        self.status = f"User lookup timed out: {asset_ip(asset)}"
+        self._invalidate(clear_error=False)
 
     def _asset_users_loaded(
         self,
@@ -1778,7 +1856,12 @@ class JumpServerTui:
         error: str,
     ) -> None:
         asset_id = str(asset.get("id") or "")
+        if asset_id not in self._pending_user_assets:
+            return
         self._pending_user_assets.discard(asset_id)
+        timer = self._user_request_timers.pop(asset_id, None)
+        if timer is not None:
+            timer.cancel()
         if error:
             self.last_error = error
             self.status = f"Unable to load users: {asset_ip(asset)}"
@@ -1992,7 +2075,12 @@ class JumpServerTui:
         return_to_assets: bool,
     ) -> None:
         key = (str(asset.get("id") or ""), str(user.get("id") or ""))
+        if key not in self._pending_connection_keys:
+            return
         self._pending_connection_keys.discard(key)
+        timer = self._connection_request_timers.pop(key, None)
+        if timer is not None:
+            timer.cancel()
         if error or token is None:
             self.last_error = error or "unable to obtain SSH token"
             self.status = f"Authentication failed: {asset_ip(asset)}"
@@ -2047,6 +2135,21 @@ class JumpServerTui:
                     lambda: self._authenticated_for_ssh(asset, user, token, error, return_to_assets)
                 )
 
+            timer = threading.Timer(
+                self._request_timeout_seconds(),
+                lambda: self._from_session_thread(
+                    lambda: self._authenticated_for_ssh(
+                        asset,
+                        user,
+                        None,
+                        "SSH authentication request timed out",
+                        return_to_assets,
+                    )
+                ),
+            )
+            timer.daemon = True
+            self._connection_request_timers[key] = timer
+            timer.start()
             threading.Thread(target=authenticate, name="jumpcli-ssh-auth", daemon=True).start()
             return True
 

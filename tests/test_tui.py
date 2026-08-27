@@ -90,6 +90,47 @@ class TuiLogicTests(unittest.TestCase):
         self.assertTrue(session.stopped)
         self.assertEqual(session.connection_status, "terminating")
 
+    def test_user_lookup_timeout_drops_pending_request(self):
+        asset = {
+            "id": "asset-1",
+            "title": "10.0.0.1",
+            "meta": {"data": {"ip": "10.0.0.1", "hostname": "api-host"}},
+        }
+        tui = JumpServerTui.__new__(JumpServerTui)
+        tui._pending_user_assets = {"asset-1"}
+        tui._user_request_timers = {}
+        tui.last_error = ""
+        tui.status = ""
+        tui._invalidate = lambda **kwargs: None
+
+        tui._asset_users_timed_out(asset)
+        tui._asset_users_loaded(asset, [{"id": "u"}], "")
+
+        self.assertNotIn("asset-1", tui._pending_user_assets)
+        self.assertIn("timed out", tui.last_error)
+        self.assertNotIn("users", tui.__dict__)
+
+    def test_cancel_pending_auth_ignores_late_result(self):
+        asset = {"id": "asset-1", "title": "10.0.0.1", "meta": {"data": {"ip": "10.0.0.1"}}}
+        user = {"id": "user-1", "username": "ops"}
+        tui = JumpServerTui.__new__(JumpServerTui)
+        tui._pending_connection_keys = {("asset-1", "user-1")}
+        tui._connection_request_timers = {}
+        tui.embedded_sessions = []
+        tui.embedded_session = None
+        tui.view = "terminal"
+        tui.users = [user]
+        tui.user_index = 0
+        tui.status = ""
+        tui._focus_navigation = lambda: None
+        tui._invalidate = lambda **kwargs: None
+        tui._cancel_pending_connections()
+        tui._authenticated_for_ssh(asset, user, "late-token", "", False)
+
+        self.assertFalse(tui._pending_connection_keys)
+        self.assertFalse(tui.embedded_sessions)
+        self.assertEqual(tui.view, "assets")
+
 
 if __name__ == "__main__":
     unittest.main()

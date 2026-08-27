@@ -67,6 +67,9 @@ building the embedded SSH TUI. Read it before changing `tui.py` or
 - Batch connection keeps the first successfully created session as the main
   session. Pending authentication must not make the UI leave terminal mode
   prematurely.
+- Every background user/token request needs a visible timeout and must ignore
+  late results after timeout or cancellation. A cancelled request must not
+  create a session when its worker eventually returns.
 
 ## Regression Checklist
 
