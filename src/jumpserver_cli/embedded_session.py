@@ -253,7 +253,7 @@ class EmbeddedPtySession:
                     break
         # A custom prompt may not end in a conventional shell marker. Do not
         # keep input trapped forever after the SSH startup grace period.
-        if not self._input_ready and time.monotonic() - self._input_started_at >= 3.0:
+        if not self._input_ready and time.monotonic() - self._input_started_at >= 1.0:
             self._input_ready = True
         if self._input_ready and self._input_pending and self.master_fd is not None:
             self._write(self.master_fd, bytes(self._input_pending))

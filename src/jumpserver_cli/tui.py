@@ -587,7 +587,7 @@ class JumpServerTui:
         with __import__("contextlib").suppress(Exception):
             get_app().clipboard.set_data(ClipboardData(text))
         copied = False
-        for command in (("wl-copy",), ("pbcopy",)):
+        for command in (("clip.exe",), ("/mnt/c/Windows/System32/clip.exe",), ("wl-copy",), ("pbcopy",)):
             try:
                 subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1)
             except (FileNotFoundError, OSError, subprocess.SubprocessError):
@@ -628,7 +628,14 @@ class JumpServerTui:
         with __import__("contextlib").suppress(Exception):
             text = get_app().clipboard.get_data().text
         if not text:
-            for command in (("wl-paste", "--no-newline"), ("xclip", "-selection", "clipboard", "-o"), ("xsel", "--clipboard", "--output"), ("pbpaste",)):
+            for command in (
+                ("powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"),
+                ("pwsh.exe", "-NoProfile", "-Command", "Get-Clipboard"),
+                ("wl-paste", "--no-newline"),
+                ("xclip", "-selection", "clipboard", "-o"),
+                ("xsel", "--clipboard", "--output"),
+                ("pbpaste",),
+            ):
                 try:
                     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=1)
                 except (FileNotFoundError, OSError, subprocess.SubprocessError):
