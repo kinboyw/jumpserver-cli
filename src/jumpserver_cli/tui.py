@@ -1258,6 +1258,7 @@ class JumpServerTui:
                 ("class:footer.key", "Tab"), ("class:item.muted", " focus  "),
                 ("class:footer.key", "Enter"), ("class:item.muted", " connect  "),
                 ("class:footer.key", "Space"), ("class:item.muted", " select  "),
+                ("class:footer.key", "Ctrl-A"), ("class:item.muted", " all/none  "),
                 ("class:footer.key", "type"), ("class:item.muted", " search  "),
                 ("class:footer.key", "Ctrl-Q/C"), ("class:item.muted", " quit"),
             ]
@@ -1281,6 +1282,21 @@ class JumpServerTui:
             self.selected_asset_ids.remove(asset_id)
         else:
             self.selected_asset_ids.add(asset_id)
+        self.status = f"Selected assets: {len(self.selected_asset_ids)}"
+        self._invalidate()
+
+    def _toggle_all_asset_selection(self) -> None:
+        visible_ids = {
+            str(asset.get("id") or "")
+            for asset in self.filtered_assets
+            if asset.get("id")
+        }
+        if not visible_ids:
+            return
+        if visible_ids <= self.selected_asset_ids:
+            self.selected_asset_ids.difference_update(visible_ids)
+        else:
+            self.selected_asset_ids.update(visible_ids)
         self.status = f"Selected assets: {len(self.selected_asset_ids)}"
         self._invalidate()
 
@@ -1958,6 +1974,10 @@ class JumpServerTui:
         @keys.add("space", filter=asset_typing, eager=True)
         def _select_asset(event: Any) -> None:
             self._toggle_asset_selection()
+
+        @keys.add("c-a", filter=asset_typing, eager=True)
+        def _select_all_assets(event: Any) -> None:
+            self._toggle_all_asset_selection()
 
         return keys
 
