@@ -594,6 +594,10 @@ class JumpServerTui:
         def color(value: str) -> str | None:
             if value == "default":
                 return None
+            if value.startswith("bright"):
+                # pyte uses names such as ``brightblue`` while
+                # prompt-toolkit requires the ANSI prefix for bright colors.
+                return f"ansi{value}"
             return f"#{value}" if len(value) == 6 and all(char in "0123456789abcdefABCDEF" for char in value) else value
 
         parts = ["class:terminal"]
