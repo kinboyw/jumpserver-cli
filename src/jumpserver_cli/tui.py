@@ -30,7 +30,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.dimension import Dimension as D
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame, TextArea
 
@@ -219,6 +219,7 @@ class JumpServerTui:
         self.session_search_query = ""
         self.view = "assets"
         self.asset_index = 0
+        self.selected_asset_ids: set[str] = set()
         self.user_index = 0
         self.history_index = 0
         self.users: list[dict[str, Any]] = []
@@ -1082,6 +1083,9 @@ class JumpServerTui:
                 self.user_index = index
         elif 0 <= index < len(self.filtered_assets):
             self.asset_index = index
+            if MouseModifier.Shift in event.modifiers:
+                self._toggle_asset_selection()
+                return
         self._invalidate()
 
     def _history_mouse_handler(self, event: MouseEvent) -> None:
@@ -1127,10 +1131,17 @@ class JumpServerTui:
 
     def _asset_row(self, asset: dict[str, Any], selected: bool) -> str:
         marker = ">" if selected else " "
+        asset_id = str(asset.get("id") or "")
+        selection = "[x]" if asset_id in self.selected_asset_ids else "[ ]"
+        connected = any(
+            session.alive and getattr(session, "asset_id", "") == asset_id
+            for session in self.embedded_sessions
+        )
+        state = "●" if connected else " "
         data = asset_data(asset)
         platform = str(data.get("platform") or "?")
         protocol = ",".join(str(item) for item in data.get("protocols") or []) or "ssh/?"
-        return f"{marker} +-- {asset_ip(asset):<16} {asset_hostname(asset)[:34]:<34} {platform:<7} {protocol}"
+        return f"{marker} {selection} {state} {asset_ip(asset):<16} {asset_hostname(asset)[:34]:<34} {platform:<7} {protocol}"
 
     def _user_row(self, user: dict[str, Any], selected: bool) -> str:
         marker = ">" if selected else " "
@@ -1221,14 +1232,34 @@ class JumpServerTui:
                     ("class:footer.key", "Ctrl-X"), ("class:item.muted", " r refresh  q quit  n resources  u/d transfer"),
                 ]
             )
+        if self.filter_mode:
+            return FormattedText(
+                [
+                    ("class:item.muted", status),
+                    ("class:footer.key", "Up/Down"), ("class:item.muted", " navigate  "),
+                    ("class:footer.key", "Enter"), ("class:item.muted", " connect  "),
+                    ("class:footer.key", "Esc"), ("class:item.muted", " close filter  "),
+                    ("class:footer.key", "Ctrl-Q/C"), ("class:item.muted", " quit"),
+                ]
+            )
+        if self.view == "users":
+            return FormattedText(
+                [
+                    ("class:item.muted", status),
+                    ("class:footer.key", "Enter"), ("class:item.muted", " connect  "),
+                    ("class:footer.key", "Esc"), ("class:item.muted", " assets  "),
+                    ("class:footer.key", "Ctrl-N"), ("class:item.muted", " sessions  "),
+                    ("class:footer.key", "Ctrl-Q/C"), ("class:item.muted", " quit"),
+                ]
+            )
         return FormattedText(
             [
                 ("class:item.muted", status),
                 ("class:footer.key", "Tab"), ("class:item.muted", " focus  "),
                 ("class:footer.key", "Enter"), ("class:item.muted", " connect  "),
+                ("class:footer.key", "Space"), ("class:item.muted", " select  "),
                 ("class:footer.key", "type"), ("class:item.muted", " search  "),
-                ("class:footer.key", "r"), ("class:item.muted", " reload  "),
-                ("class:footer.key", "q"), ("class:item.muted", " quit"),
+                ("class:footer.key", "Ctrl-Q/C"), ("class:item.muted", " quit"),
             ]
         )
 
@@ -1238,6 +1269,62 @@ class JumpServerTui:
             return None
         self.asset_index = max(0, min(self.asset_index, len(assets) - 1))
         return assets[self.asset_index]
+
+    def _toggle_asset_selection(self) -> None:
+        asset = self._selected_asset()
+        if not asset:
+            return
+        asset_id = str(asset.get("id") or "")
+        if not asset_id:
+            return
+        if asset_id in self.selected_asset_ids:
+            self.selected_asset_ids.remove(asset_id)
+        else:
+            self.selected_asset_ids.add(asset_id)
+        self.status = f"Selected assets: {len(self.selected_asset_ids)}"
+        self._invalidate()
+
+    def _toggle_terminal_navigation(self) -> None:
+        if self.view == "terminal":
+            self._open_new_session()
+        elif self.embedded_sessions:
+            self.view = "terminal"
+            self.users = []
+            self.user_index = 0
+            self.embedded_session = self.embedded_sessions[self.active_session_index]
+            self.status = "Returned to active SSH session"
+            self._focus_terminal()
+            self._invalidate()
+
+    def _batch_connect_selected(self) -> None:
+        if not self.selected_asset_ids:
+            self._connect_current()
+            return
+        if not getattr(self.args, "pty_mode", False):
+            self.status = "Batch open requires embedded PTY mode"
+            self._invalidate()
+            return
+        assets = [asset for asset in self.assets if str(asset.get("id") or "") in self.selected_asset_ids]
+        opened = 0
+        skipped = 0
+        self.selected_asset_ids.clear()
+        for asset in assets:
+            try:
+                users = self.client.system_users(str(asset["id"]))
+            except JumpCliError:
+                skipped += 1
+                continue
+            if len(users) != 1:
+                skipped += 1
+                continue
+            self._run_ssh(asset, users[0])
+            opened += 1
+        if opened == 0:
+            self.view = "assets"
+            self.focus = "assets"
+            self._focus_navigation()
+        self.status = f"Opened {opened} session(s)" + (f"; skipped {skipped}" if skipped else "")
+        self._invalidate()
 
     def _invalidate(self) -> None:
         self.last_error = ""
@@ -1579,7 +1666,11 @@ class JumpServerTui:
 
         @keys.add("c-n", filter=terminal_active, eager=True)
         def _new_session(event: Any) -> None:
-            self._open_new_session()
+            self._toggle_terminal_navigation()
+
+        @keys.add("c-n", filter=Condition(lambda: self.view != "terminal" and bool(self.embedded_sessions)), eager=True)
+        def _return_session(event: Any) -> None:
+            self._toggle_terminal_navigation()
 
         @keys.add("f4", filter=terminal_active, eager=True)
         def _resources(event: Any) -> None:
@@ -1698,6 +1789,8 @@ class JumpServerTui:
                 self.filter_mode = False
                 self._focus_navigation()
                 self._connect_current()
+            elif self.view == "assets" and self.selected_asset_ids:
+                self._batch_connect_selected()
             else:
                 self._connect_current()
 
@@ -1841,14 +1934,10 @@ class JumpServerTui:
             def _session_type(event: Any, value: str = char) -> None:
                 self._session_search(self.session_search_query + value)
 
-        @keys.add("q", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and not self.picker_open), eager=True)
+        @keys.add("c-q", filter=Condition(lambda: not self.picker_open), eager=True)
         def _quit_key(event: Any) -> None:
             self._stop_embedded_sessions()
             event.app.exit(result=0)
-
-        @keys.add("r", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and not self.picker_open), eager=True)
-        def _reload(event: Any) -> None:
-            self._reload()
 
         # Any printable key starts asset filtering immediately when the asset
         # pane is focused. Arrow keys remain navigation keys; j/k are text here.
@@ -1865,6 +1954,10 @@ class JumpServerTui:
         @keys.add("backspace", filter=asset_typing, eager=True)
         def _search_backspace(event: Any) -> None:
             self._start_search_with(self.query[:-1])
+
+        @keys.add("space", filter=asset_typing, eager=True)
+        def _select_asset(event: Any) -> None:
+            self._toggle_asset_selection()
 
         return keys
 
