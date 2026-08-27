@@ -32,6 +32,7 @@ ZMODEM_PREFIXES = tuple(
     for marker in (b"**\x18B", b"\x18B")
     for length in range(1, len(marker) + 1)
 )
+ECHOED_PROMPT = re.compile(r"^([^\s\[]+@[^\[]+)(\[[^\]]+@[^\]]+\]\s*[$#>%].*)$")
 
 
 class SessionScreen(pyte.HistoryScreen):
@@ -75,9 +76,6 @@ class EmbeddedPtySession:
         self._stopping = False
         self._detect_buffer = bytearray()
         self._suppress_protocol_until = 0.0
-        self._input_pending = bytearray()
-        self._input_ready = False
-        self._input_started_at = time.monotonic()
 
     @property
     def alive(self) -> bool:
@@ -89,19 +87,13 @@ class EmbeddedPtySession:
             os.execvp(self.command[0], self.command)
         self.pid = pid
         self.master_fd = master_fd
-        self._input_started_at = time.monotonic()
         self._set_pty_size(notify=False)
         self._thread = threading.Thread(target=self._reader, name="jumpcli-ssh-pty", daemon=True)
         self._thread.start()
 
     def send(self, data: bytes) -> None:
         with self._lock:
-            if not data:
-                return
-            self._release_pending_if_ready()
-            if not self._input_ready:
-                self._input_pending.extend(data)
-            elif self.master_fd is not None:
+            if self.master_fd is not None and data:
                 self._write(self.master_fd, data)
 
     def send_immediate(self, data: bytes) -> None:
@@ -140,27 +132,22 @@ class EmbeddedPtySession:
     def display_snapshot(self) -> tuple[str, ...]:
         """Return a consistent screen image for the prompt-toolkit renderer."""
         with self._lock:
-            lines = list(self.screen.display)
-            title = self.screen.title
-            if title:
-                lines = [line[len(title) :] if line.startswith(title) else line for line in lines]
+            lines = [self._clean_display_line(line)[0] for line in self.screen.display]
             return tuple(lines)
 
     def cursor_snapshot(self) -> tuple[int, int, bool]:
         with self._lock:
             x, y, hidden = self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
-            title = self.screen.title
-            if title and 0 <= y < self.screen.lines:
+            if 0 <= y < self.screen.lines:
                 line = self.screen.display[y]
-                if line.startswith(title):
-                    x = max(0, x - len(title))
+                _, removed = self._clean_display_line(line)
+                x = max(0, x - removed)
             return x, y, hidden
 
     def styled_snapshot(self) -> tuple[tuple[tuple[str, tuple[Any, ...]], ...], ...]:
         """Return character data and terminal attributes as one render snapshot."""
         with self._lock:
             rows = []
-            title = self.screen.title
             for row in range(self.screen.lines):
                 chars = []
                 for column in range(self.screen.columns):
@@ -176,10 +163,28 @@ class EmbeddedPtySession:
                         char.blink,
                     )
                     chars.append((char.data, attrs))
-                if title and "".join(char for char, _ in chars).startswith(title):
-                    chars = chars[len(title) :]
+                _, removed = self._clean_display_line("".join(char for char, _ in chars))
+                if removed:
+                    chars = chars[removed:]
                 rows.append(tuple(chars))
             return tuple(rows)
+
+    def _clean_display_line(self, line: str) -> tuple[str, int]:
+        """Hide a terminal title/prompt that JumpServer has echoed as text.
+
+        Some JumpServer terminal responses contain the OSC title payload as
+        ordinary PTY text immediately before the real shell prompt. Only
+        remove an exact title prefix or a line with the strict duplicated
+        ``user@host... [user@host...]$`` shape; ordinary command output is
+        left untouched.
+        """
+        title = self.screen.title
+        if title and line.startswith(title):
+            return line[len(title):], len(title)
+        match = ECHOED_PROMPT.match(line)
+        if match:
+            return match.group(2), len(match.group(1))
+        return line, 0
 
     def scroll_history(self, direction: int) -> None:
         with self._lock:
@@ -245,8 +250,6 @@ class EmbeddedPtySession:
             while not self._stopping:
                 readable, _, _ = select.select([self.master_fd], [], [], 0.1)
                 if self.master_fd not in readable:
-                    with self._lock:
-                        self._release_pending_if_ready()
                     self._poll_transfer()
                     continue
                 try:
@@ -285,22 +288,7 @@ class EmbeddedPtySession:
     def _consume_screen(self, data: bytes) -> None:
         with self._lock:
             self.stream.feed(data)
-            self._release_pending_if_ready()
         self.on_change()
-
-    def _release_pending_if_ready(self) -> None:
-        if not self._input_ready:
-            for line in reversed(self.screen.display):
-                if line.rstrip() and re.search(r"(?:[$#>%])\s*$", line.rstrip()):
-                    self._input_ready = True
-                    break
-        # A custom prompt may not end in a conventional shell marker. Do not
-        # keep input trapped forever after the SSH startup grace period.
-        if not self._input_ready and time.monotonic() - self._input_started_at >= 1.0:
-            self._input_ready = True
-        if self._input_ready and self._input_pending and self.master_fd is not None:
-            self._write(self.master_fd, bytes(self._input_pending))
-            self._input_pending.clear()
 
     def _consume_or_detect(self, data: bytes) -> None:
         if time.monotonic() < self._suppress_protocol_until:
