@@ -578,9 +578,22 @@ class JumpServerTui:
         for index, session in enumerate(self.embedded_sessions):
             asset = getattr(session, "asset_label", "SSH session")
             marker = ">" if index == self.active_session_index else " "
-            style = "class:item.selected" if index == self.active_session_index else "class:item"
             state = getattr(session, "connection_status", "connected")
-            rows.append((style, f"{marker} {index + 1:02d} {asset} [{state}]\n"))
+            state_icon = {
+                "connected": "●",
+                "connecting": "◌",
+                "terminating": "×",
+                "error": "!",
+            }.get(state, "?")
+            if index == self.active_session_index:
+                style = "class:item.selected"
+            elif state == "connected":
+                style = "class:item.accent"
+            elif state in {"connecting", "terminating"}:
+                style = "class:item.warn"
+            else:
+                style = "class:error"
+            rows.append((style, f"{marker} {state_icon} {index + 1:02d} {asset} [{state}]\n"))
         rows.append(("class:item.muted", "\n  Enter switch  Ctrl-N new"))
         return rows
 
@@ -1322,6 +1335,10 @@ class JumpServerTui:
     def _asset_frame_text(self) -> FormattedText:
         title = " ASSET TREE " if self.view != "users" else " SYSTEM USERS "
         style = "class:frame.focused" if self.focus == "assets" else "class:frame.title"
+        if self.view != "users":
+            title += f"  [{len(self.filtered_assets)}/{len(self.assets)}]"
+            if self.selected_asset_ids:
+                title += f"  selected:{len(self.selected_asset_ids)}"
         rows = [(style, title + "\n")]
         if self.view == "users":
             for index, user in enumerate(self.users):
@@ -1456,6 +1473,17 @@ class JumpServerTui:
                         ("class:footer.key", "n"), ("class:item.muted", " resources  "),
                         ("class:footer.key", "u/d"), ("class:item.muted", " transfer  "),
                         ("class:footer.key", "Esc"), ("class:item.muted", " cancel"),
+                    ]
+                )
+            if self.focus == "sessions":
+                return FormattedText(
+                    [
+                        ("class:item.muted", status),
+                        ("class:footer.key", "type"), ("class:item.muted", " locate  "),
+                        ("class:footer.key", "Up/Down"), ("class:item.muted", " switch  "),
+                        ("class:footer.key", "Enter"), ("class:item.muted", " terminal  "),
+                        ("class:footer.key", "Ctrl-W"), ("class:item.muted", " terminate  "),
+                        ("class:footer.key", "Tab/Ctrl-N"), ("class:item.muted", " terminal/resources"),
                     ]
                 )
             return FormattedText(
