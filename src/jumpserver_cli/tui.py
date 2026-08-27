@@ -2440,10 +2440,11 @@ def run_tui(args: Any) -> int:
                 )
             args.base_url = first_run_setup()
         store, client = ensure_auth(args, "127.0.0.1")
-        assets = client.assets_tree("")
-        screen = JumpServerTui(args, store, client, assets)
-        screen.status = f"Loaded {len(screen.assets)} assets"
-        screen.application.run()
+        # Start the renderer before the initial asset request so a slow
+        # JumpServer API cannot make the terminal appear frozen.
+        screen = JumpServerTui(args, store, client, [])
+        screen.status = "Loading assets"
+        screen.application.run(pre_run=screen._reload)
         return 0
     except (JumpCliError, EOFError, KeyboardInterrupt) as exc:
         if isinstance(exc, KeyboardInterrupt):
