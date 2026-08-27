@@ -288,6 +288,10 @@ class JumpServerTui:
             max_render_postpone_time=0,
             refresh_interval=0.5,
         )
+        # Escape is both a standalone key and the prefix of arrow/Alt
+        # sequences. Keep the disambiguation window short so leaving an SSH
+        # pane does not feel like a one-second pause.
+        self.application.ttimeoutlen = 0.05
 
     @property
     def filtered_assets(self) -> list[dict[str, Any]]:
