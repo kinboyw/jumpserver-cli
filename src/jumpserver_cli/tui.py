@@ -411,10 +411,12 @@ class JumpServerTui:
         asset_window = Window(
             content=self.asset_control,
             width=D(preferred=68, min=42),
+            wrap_lines=False,
             get_vertical_scroll=self._asset_vertical_scroll,
         )
         compact_asset_window = Window(
             content=self.asset_control,
+            wrap_lines=False,
             get_vertical_scroll=self._asset_vertical_scroll,
         )
         body = VSplit(
@@ -1321,7 +1323,16 @@ class JumpServerTui:
                 session.alive and getattr(session, "asset_id", "") == str(asset.get("id") or "")
                 for session in self.embedded_sessions
             )
-            style = "class:item.selected" if selected else "class:item.accent" if connected else "class:item"
+            pending = str(asset.get("id") or "") in self._pending_user_assets
+            style = (
+                "class:item.selected"
+                if selected
+                else "class:item.accent"
+                if connected
+                else "class:item.warn"
+                if pending
+                else "class:item"
+            )
             rows.append((style, self._asset_row(asset, selected) + "\n"))
         return FormattedText(rows)
 
@@ -1338,6 +1349,8 @@ class JumpServerTui:
             for session in self.embedded_sessions
         )
         state = "●" if connected else " "
+        if not connected and asset_id in self._pending_user_assets:
+            state = "◌"
         data = asset_data(asset)
         try:
             compact = get_app().output.get_size().columns < 110
