@@ -7,8 +7,9 @@ session history.
 
 from __future__ import annotations
 
-import json
+import base64
 import difflib
+import json
 import subprocess
 import sys
 import time
@@ -580,14 +581,38 @@ class JumpServerTui:
         with __import__("contextlib").suppress(Exception):
             get_app().clipboard.set_data(ClipboardData(text))
         copied = False
-        for command in (("wl-copy",), ("xclip", "-selection", "clipboard"), ("xsel", "--clipboard", "--input"), ("pbcopy",)):
+        for command in (("wl-copy",), ("pbcopy",)):
             try:
                 subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1)
             except (FileNotFoundError, OSError, subprocess.SubprocessError):
                 continue
             copied = True
             break
-        self.status = "Selected text copied" if copied else "Selected text copied to TUI clipboard"
+        if not copied:
+            for command in (("xclip", "-selection", "clipboard"), ("xsel", "--clipboard", "--input")):
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    if process.stdin is not None:
+                        process.stdin.write(text.encode("utf-8"))
+                        process.stdin.close()
+                    copied = True
+                    break
+                except (FileNotFoundError, OSError, subprocess.SubprocessError):
+                    continue
+        # OSC 52 is understood by modern terminal emulators and works even
+        # when no clipboard helper is installed inside the host environment.
+        with __import__("contextlib").suppress(Exception):
+            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            get_app().output.write_raw(f"\033]52;c;{encoded}\a")
+            get_app().output.flush()
+            copied = True
+        self.status = "Selected text copied to system clipboard" if copied else "Unable to access system clipboard"
         self._invalidate()
 
     def _paste_terminal_clipboard(self) -> None:
@@ -1172,6 +1197,21 @@ class JumpServerTui:
         return_to_assets = self.view == "users"
 
         if getattr(self.args, "pty_mode", False):
+            asset_id = str(asset.get("id") or "")
+            user_id = str(user.get("id") or "")
+            for index, existing in enumerate(self.embedded_sessions):
+                if (
+                    existing.alive
+                    and getattr(existing, "asset_id", "") == asset_id
+                    and getattr(existing, "system_user_id", "") == user_id
+                ):
+                    self.active_session_index = index
+                    self.embedded_session = existing
+                    self.view = "terminal"
+                    self.status = "Reusing active SSH session"
+                    self._focus_terminal()
+                    self._invalidate()
+                    return
             try:
                 token = get_token_for_resolved(self.store, self.client, asset, user, quiet=True)
             except JumpCliError as exc:
@@ -1195,6 +1235,8 @@ class JumpServerTui:
                 on_exit=lambda code: self._terminal_exited(holder["session"], code),
             )
             holder["session"] = session
+            session.asset_id = asset_id
+            session.system_user_id = user_id
             session.asset_label = f"{asset_ip(asset)} {asset_hostname(asset)}"
             self.embedded_sessions.append(session)
             self.active_session_index = len(self.embedded_sessions) - 1
@@ -1270,7 +1312,14 @@ class JumpServerTui:
                 if self.focus == "sessions":
                     self._leave_session_search()
                 else:
-                    self._send_terminal(b"\x04")
+                    self.view = "assets"
+                    self.users = []
+                    self.user_index = 0
+                    self.focus = "assets"
+                    self.terminal_selection_anchor = None
+                    self.terminal_selection_end = None
+                    self.status = "SSH session kept alive"
+                    self._focus_navigation()
             elif self.filter_mode:
                 self.filter_mode = False
                 self._focus_navigation()

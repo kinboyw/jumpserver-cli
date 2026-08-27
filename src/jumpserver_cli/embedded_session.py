@@ -62,7 +62,7 @@ class EmbeddedPtySession:
         self.on_change = on_change
         self.on_zmodem = on_zmodem
         self.on_exit = on_exit
-        self.screen = SessionScreen(columns, lines, self.send)
+        self.screen = SessionScreen(columns, lines, self.send_immediate)
         self.stream = pyte.ByteStream(self.screen)
         self.master_fd: int | None = None
         self.pid: int | None = None
@@ -75,6 +75,8 @@ class EmbeddedPtySession:
         self._stopping = False
         self._detect_buffer = bytearray()
         self._suppress_protocol_until = 0.0
+        self._input_pending = bytearray()
+        self._input_ready = False
 
     @property
     def alive(self) -> bool:
@@ -91,6 +93,16 @@ class EmbeddedPtySession:
         self._thread.start()
 
     def send(self, data: bytes) -> None:
+        with self._lock:
+            if not data:
+                return
+            if not self._input_ready:
+                self._input_pending.extend(data)
+            elif self.master_fd is not None:
+                self._write(self.master_fd, data)
+
+    def send_immediate(self, data: bytes) -> None:
+        """Send terminal-protocol replies even before the shell prompt exists."""
         with self._lock:
             if self.master_fd is not None and data:
                 self._write(self.master_fd, data)
@@ -225,6 +237,14 @@ class EmbeddedPtySession:
     def _consume_screen(self, data: bytes) -> None:
         with self._lock:
             self.stream.feed(data)
+            if not self._input_ready:
+                for line in reversed(self.screen.display):
+                    if line.rstrip() and re.search(r"(?:[$#>%])\s*$", line.rstrip()):
+                        self._input_ready = True
+                        break
+                if self._input_ready and self._input_pending and self.master_fd is not None:
+                    self._write(self.master_fd, bytes(self._input_pending))
+                    self._input_pending.clear()
         self.on_change()
 
     def _consume_or_detect(self, data: bytes) -> None:
