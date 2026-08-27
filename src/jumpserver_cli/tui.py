@@ -1083,7 +1083,7 @@ class JumpServerTui:
                 self.user_index = index
         elif 0 <= index < len(self.filtered_assets):
             self.asset_index = index
-            if MouseModifier.Shift in event.modifiers:
+            if MouseModifier.SHIFT in event.modifiers or 2 <= event.position.x <= 4:
                 self._toggle_asset_selection()
                 return
         self._invalidate()
