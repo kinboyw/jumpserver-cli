@@ -22,6 +22,12 @@ TUI 预览：
 
 开发和维护 TUI 时，请先阅读 [TUI 开发注意事项](docs/tui-development.md)，其中记录了嵌入式 PTY、渲染性能、输入路由、PS1 清理、会话生命周期和已知回归的处理约束。
 
+运行离线回归测试：
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
 ## 快速开始
 
 ### 1. 获取代码
