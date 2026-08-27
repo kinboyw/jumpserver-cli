@@ -92,6 +92,14 @@ STYLE = Style.from_dict(
     }
 )
 
+ANSI_COLOR_HEX = {
+    "black": "#000000", "red": "#aa0000", "green": "#00aa00", "yellow": "#aa5500",
+    "blue": "#0000aa", "magenta": "#aa00aa", "cyan": "#00aaaa", "white": "#aaaaaa",
+    "brightblack": "#555555", "brightred": "#ff5555", "brightgreen": "#55ff55",
+    "brightyellow": "#ffff55", "brightblue": "#5555ff", "brightmagenta": "#ff55ff",
+    "brightcyan": "#55ffff", "brightwhite": "#ffffff",
+}
+
 
 def fuzzy_match(query: str, *parts: str) -> bool:
     """Match every whitespace-separated term as a contiguous substring."""
@@ -634,10 +642,8 @@ class JumpServerTui:
         def color(value: str) -> str | None:
             if value == "default":
                 return None
-            if value.startswith("bright"):
-                # pyte uses names such as ``brightblue`` while
-                # prompt-toolkit requires the ANSI prefix for bright colors.
-                return f"ansi{value}"
+            if value in ANSI_COLOR_HEX:
+                return ANSI_COLOR_HEX[value]
             return f"#{value}" if len(value) == 6 and all(char in "0123456789abcdefABCDEF" for char in value) else value
 
         parts = ["class:terminal"]
