@@ -229,6 +229,7 @@ class JumpServerTui:
         self.embedded_session: EmbeddedPtySession | None = None
         self.active_session_index = 0
         self.split_mode = False
+        self.batch_connecting = False
         self.terminal_command_prefix = False
         self.context_menu_open = False
         self.context_menu_index = 0
@@ -490,7 +491,8 @@ class JumpServerTui:
             asset = getattr(session, "asset_label", "SSH session")
             marker = ">" if index == self.active_session_index else " "
             style = "class:item.selected" if index == self.active_session_index else "class:item"
-            rows.append((style, f"{marker} {index + 1:02d} {asset}\n"))
+            state = getattr(session, "connection_status", "connected")
+            rows.append((style, f"{marker} {index + 1:02d} {asset} [{state}]\n"))
         rows.append(("class:item.muted", "\n  Enter switch  Ctrl-N new"))
         return rows
 
@@ -1122,7 +1124,12 @@ class JumpServerTui:
             rows.append(("class:item.muted", "  No matching assets\n"))
         for index, asset in enumerate(assets):
             selected = index == self.asset_index
-            rows.append(("class:item.selected" if selected else "class:item", self._asset_row(asset, selected) + "\n"))
+            connected = any(
+                session.alive and getattr(session, "asset_id", "") == str(asset.get("id") or "")
+                for session in self.embedded_sessions
+            )
+            style = "class:item.selected" if selected else "class:item.accent" if connected else "class:item"
+            rows.append((style, self._asset_row(asset, selected) + "\n"))
         return FormattedText(rows)
 
     def _detail_frame_text(self) -> FormattedText:
@@ -1324,18 +1331,28 @@ class JumpServerTui:
         assets = [asset for asset in self.assets if str(asset.get("id") or "") in self.selected_asset_ids]
         opened = 0
         skipped = 0
+        anchor_index = len(self.embedded_sessions)
         self.selected_asset_ids.clear()
-        for asset in assets:
-            try:
-                users = self.client.system_users(str(asset["id"]))
-            except JumpCliError:
-                skipped += 1
-                continue
-            if len(users) != 1:
-                skipped += 1
-                continue
-            self._run_ssh(asset, users[0])
-            opened += 1
+        self.batch_connecting = True
+        try:
+            for asset in assets:
+                try:
+                    users = self.client.system_users(str(asset["id"]))
+                except JumpCliError:
+                    skipped += 1
+                    continue
+                if len(users) != 1:
+                    skipped += 1
+                    continue
+                if self._run_ssh(asset, users[0]):
+                    opened += 1
+        finally:
+            self.batch_connecting = False
+        if opened and anchor_index < len(self.embedded_sessions):
+            self.active_session_index = anchor_index
+            self.embedded_session = self.embedded_sessions[anchor_index]
+            self.view = "terminal"
+            self._focus_terminal()
         if opened == 0:
             self.view = "assets"
             self.focus = "assets"
@@ -1454,6 +1471,8 @@ class JumpServerTui:
             loop.call_soon_threadsafe(callback)
 
     def _terminal_changed(self, session: EmbeddedPtySession) -> None:
+        if getattr(session, "connection_status", "") == "connecting":
+            session.connection_status = "connected"
         self._from_session_thread(self._invalidate)
 
     def _terminal_zmodem(self, session: EmbeddedPtySession, direction: str) -> None:
@@ -1533,9 +1552,9 @@ class JumpServerTui:
         for session in list(self.embedded_sessions):
             session.stop()
 
-    def _run_ssh(self, asset: dict[str, Any] | None, user: dict[str, Any]) -> None:
+    def _run_ssh(self, asset: dict[str, Any] | None, user: dict[str, Any]) -> bool:
         if not asset:
-            return
+            return False
         return_to_assets = self.view == "users"
 
         if getattr(self.args, "pty_mode", False):
@@ -1553,13 +1572,13 @@ class JumpServerTui:
                     self.status = "Reusing active SSH session"
                     self._focus_terminal()
                     self._invalidate()
-                    return
+                    return True
             try:
                 token = get_token_for_resolved(self.store, self.client, asset, user, quiet=True)
             except JumpCliError as exc:
                 self.last_error = str(exc)
                 self._invalidate()
-                return
+                return False
             command = build_ssh_command(token, ssh_options=[], force_tty=True)
             self.history.record(asset, user)
             self.view = "terminal"
@@ -1580,13 +1599,16 @@ class JumpServerTui:
             session.asset_id = asset_id
             session.system_user_id = user_id
             session.asset_label = f"{asset_ip(asset)} {asset_hostname(asset)}"
+            session.connection_status = "connecting"
             self.embedded_sessions.append(session)
-            self.active_session_index = len(self.embedded_sessions) - 1
-            self.embedded_session = session
+            if not self.batch_connecting:
+                self.active_session_index = len(self.embedded_sessions) - 1
+                self.embedded_session = session
             session.start()
-            self._focus_terminal()
+            if not self.batch_connecting:
+                self._focus_terminal()
             self._invalidate()
-            return
+            return True
 
         def connect() -> None:
             try:
@@ -1615,6 +1637,7 @@ class JumpServerTui:
             self.focus = "assets"
             self._focus_navigation()
             self._invalidate()
+        return True
 
     def _bindings(self) -> KeyBindings:
         keys = KeyBindings()
@@ -1685,7 +1708,7 @@ class JumpServerTui:
         def _new_session(event: Any) -> None:
             self._toggle_terminal_navigation()
 
-        @keys.add("c-n", filter=Condition(lambda: self.view != "terminal" and bool(self.embedded_sessions)), eager=True)
+        @keys.add("c-n", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and bool(self.embedded_sessions)), eager=True)
         def _return_session(event: Any) -> None:
             self._toggle_terminal_navigation()
 
@@ -1805,7 +1828,10 @@ class JumpServerTui:
             elif self.filter_mode:
                 self.filter_mode = False
                 self._focus_navigation()
-                self._connect_current()
+                if self.selected_asset_ids:
+                    self._batch_connect_selected()
+                else:
+                    self._connect_current()
             elif self.view == "assets" and self.selected_asset_ids:
                 self._batch_connect_selected()
             else:
@@ -1982,7 +2008,11 @@ class JumpServerTui:
 
         @keys.add("c-space", filter=Condition(lambda: self.filter_mode and self.view == "assets"), eager=True)
         def _select_filtered_asset(event: Any) -> None:
-            self._toggle_asset_selection()
+            self._toggle_all_asset_selection()
+
+        @keys.add("c-a", filter=Condition(lambda: self.filter_mode and self.view == "assets"), eager=True)
+        def _select_all_filtered_assets(event: Any) -> None:
+            self._toggle_all_asset_selection()
 
         return keys
 
