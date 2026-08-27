@@ -24,6 +24,7 @@ from prompt_toolkit.clipboard.base import ClipboardData
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
@@ -48,6 +49,12 @@ from .cli import (
 )
 from .pty_session import run_pty_ssh
 from .embedded_session import EmbeddedPtySession
+
+
+# Some WSL terminal frontends emit these xterm modifier sequences directly.
+# Without explicit mappings, their trailing ``5~`` can reach the remote shell.
+ANSI_SEQUENCES.setdefault("\x1b[2;2~", Keys.ShiftInsert)
+ANSI_SEQUENCES.setdefault("\x1b[2;5~", Keys.ControlInsert)
 
 
 HISTORY_PATH = Path.home() / ".local" / "state" / "jumpserver-cli" / "history.json"
@@ -209,6 +216,8 @@ class JumpServerTui:
         self.active_session_index = 0
         self.split_mode = False
         self.terminal_command_prefix = False
+        self.context_menu_open = False
+        self.context_menu_index = 0
         self.terminal_selection_anchor: tuple[int, int] | None = None
         self.terminal_selection_end: tuple[int, int] | None = None
         self.terminal_selecting = False
@@ -254,6 +263,11 @@ class JumpServerTui:
             self._terminal_text,
             self._terminal_mouse_handler,
             self._terminal_cursor_position,
+        )
+        self.context_menu_control = MouseTextControl(
+            self._context_menu_text,
+            self._context_menu_mouse_handler,
+            lambda: Point(x=0, y=self.context_menu_index),
         )
         self.terminal_window = Window(content=self.terminal_control, wrap_lines=False)
         self.picker_path_input = TextArea(
@@ -363,7 +377,17 @@ class JumpServerTui:
                     left=8,
                     width=88,
                     height=22,
-                )
+                ),
+                Float(
+                    content=ConditionalContainer(
+                        Window(content=self.context_menu_control, wrap_lines=False),
+                        filter=Condition(lambda: self.context_menu_open),
+                    ),
+                    top=4,
+                    left=8,
+                    width=28,
+                    height=4,
+                ),
             ],
         )
 
@@ -634,6 +658,11 @@ class JumpServerTui:
         return int(time.monotonic() * 2) % 2 == 0
 
     def _terminal_mouse_handler(self, event: MouseEvent) -> None:
+        if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.RIGHT:
+            self.context_menu_open = True
+            self.context_menu_index = 0
+            self._invalidate()
+            return
         if event.event_type == MouseEventType.SCROLL_UP:
             if self.embedded_session is not None:
                 self.embedded_session.scroll_history(-1)
@@ -656,6 +685,39 @@ class JumpServerTui:
             self.terminal_selection_end = point
             self.terminal_selecting = False
             self._copy_terminal_selection()
+
+    def _context_menu_text(self) -> FormattedText:
+        items = ("Copy selection", "Paste clipboard", "Close menu")
+        rows: FormattedText = [("class:frame.focused", " ACTIONS\n")]
+        for index, item in enumerate(items):
+            style = "class:item.selected" if index == self.context_menu_index else "class:item"
+            rows.append((style, f"  {item}\n"))
+        return rows
+
+    def _close_context_menu(self) -> None:
+        self.context_menu_open = False
+        self._focus_terminal()
+        self._invalidate()
+
+    def _context_menu_activate(self) -> None:
+        if self.context_menu_index == 0:
+            self._copy_terminal_selection()
+        elif self.context_menu_index == 1:
+            self._paste_terminal_clipboard()
+        self._close_context_menu()
+
+    def _context_menu_mouse_handler(self, event: MouseEvent) -> None:
+        if event.event_type == MouseEventType.SCROLL_UP:
+            self.context_menu_index = max(0, self.context_menu_index - 1)
+        elif event.event_type == MouseEventType.SCROLL_DOWN:
+            self.context_menu_index = min(2, self.context_menu_index + 1)
+        elif event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+            index = event.position.y - 1
+            if 0 <= index <= 2:
+                self.context_menu_index = index
+                self._context_menu_activate()
+                return
+        self._invalidate()
 
     def _copy_terminal_selection(self) -> None:
         text = self._terminal_selection_text()
@@ -1407,6 +1469,7 @@ class JumpServerTui:
         terminal_input_active = Condition(
             lambda: self.view == "terminal" and not self.picker_open and self.focus == "terminal"
         )
+        context_menu_active = Condition(lambda: self.context_menu_open)
         session_focus = Condition(
             lambda: self.view == "terminal" and not self.picker_open and self.focus == "sessions"
         )
@@ -1425,6 +1488,8 @@ class JumpServerTui:
         def _escape(event: Any) -> None:
             if self.picker_open:
                 self._close_picker(cancel_transfer=True)
+            elif self.context_menu_open:
+                self._close_context_menu()
             elif self.view == "terminal":
                 if self.terminal_command_prefix:
                     self.terminal_command_prefix = False
@@ -1510,6 +1575,20 @@ class JumpServerTui:
         @keys.add("down", filter=picker_active, eager=True)
         def _picker_down(event: Any) -> None:
             self._picker_move(1)
+
+        @keys.add("up", filter=context_menu_active, eager=True)
+        def _context_up(event: Any) -> None:
+            self.context_menu_index = max(0, self.context_menu_index - 1)
+            self._invalidate()
+
+        @keys.add("down", filter=context_menu_active, eager=True)
+        def _context_down(event: Any) -> None:
+            self.context_menu_index = min(2, self.context_menu_index + 1)
+            self._invalidate()
+
+        @keys.add("enter", filter=context_menu_active, eager=True)
+        def _context_enter(event: Any) -> None:
+            self._context_menu_activate()
 
         @keys.add("down", filter=navigating, eager=True)
         @keys.add("j", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and self.focus != "assets"), eager=True)
