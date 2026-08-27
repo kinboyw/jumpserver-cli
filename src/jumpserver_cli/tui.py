@@ -8,6 +8,7 @@ session history.
 from __future__ import annotations
 
 import json
+import difflib
 import subprocess
 import sys
 import time
@@ -193,6 +194,7 @@ class JumpServerTui:
         self.query = ""
         self.filter_mode = False
         self.focus = "assets"
+        self.session_search_query = ""
         self.view = "assets"
         self.asset_index = 0
         self.user_index = 0
@@ -417,7 +419,10 @@ class JumpServerTui:
         return Point(x=0, y=self.active_session_index + 1)
 
     def _session_list_text(self) -> FormattedText:
-        rows: FormattedText = [("class:frame.focused", " ACTIVE SESSIONS\n")]
+        title = " ACTIVE SESSIONS"
+        if self.focus == "sessions":
+            title += f"  FIND: {self.session_search_query}_"
+        rows: FormattedText = [("class:frame.focused", title + "\n")]
         for index, session in enumerate(self.embedded_sessions):
             asset = getattr(session, "asset_label", "SSH session")
             marker = ">" if index == self.active_session_index else " "
@@ -438,6 +443,45 @@ class JumpServerTui:
         index = event.position.y - 1
         if 0 <= index < len(self.embedded_sessions):
             self._switch_session_to(index)
+
+    def _focus_sessions(self) -> None:
+        if len(self.embedded_sessions) <= 1:
+            return
+        self.focus = "sessions"
+        self.session_search_query = ""
+        with __import__("contextlib").suppress(Exception):
+            get_app().layout.focus(self.session_control)
+        self._invalidate()
+
+    def _session_search(self, value: str) -> None:
+        self.session_search_query = value
+        query = value.casefold().strip()
+        if query and self.embedded_sessions:
+            ranked = sorted(
+                range(len(self.embedded_sessions)),
+                key=lambda index: (
+                    -difflib.SequenceMatcher(
+                        None,
+                        query,
+                        str(getattr(self.embedded_sessions[index], "asset_label", "SSH session")).casefold(),
+                    ).ratio(),
+                    index,
+                ),
+            )
+            self.active_session_index = ranked[0]
+            self.embedded_session = self.embedded_sessions[self.active_session_index]
+        self._invalidate()
+
+    def _leave_session_search(self) -> None:
+        self.session_search_query = ""
+        self.focus = "terminal"
+        self._focus_terminal()
+        self._invalidate()
+
+    def _move_session(self, delta: int) -> None:
+        if not self.embedded_sessions:
+            return
+        self._switch_session_to((self.active_session_index + delta) % len(self.embedded_sessions))
 
     def _switch_session_to(self, index: int) -> None:
         if not self.embedded_sessions:
@@ -883,6 +927,7 @@ class JumpServerTui:
                     ("class:footer.key", "F2"), ("class:item.muted", " next  "),
                     ("class:footer.key", "F3"), ("class:item.muted", " split  "),
                     ("class:footer.key", "F4/Ctrl-N"), ("class:item.muted", " resources  "),
+                    ("class:footer.key", "F6/Tab"), ("class:item.muted", " focus sessions  "),
                     ("class:footer.key", "Ctrl-Y"), ("class:item.muted", " copy selection  "),
                     ("class:footer.key", "Ctrl-X U/D"), ("class:item.muted", " ZMODEM"),
                 ]
@@ -1087,6 +1132,7 @@ class JumpServerTui:
         self._invalidate()
 
     def _focus_terminal(self) -> None:
+        self.focus = "terminal"
         with __import__("contextlib").suppress(Exception):
             get_app().layout.focus(self.terminal_control)
 
@@ -1163,8 +1209,14 @@ class JumpServerTui:
 
     def _bindings(self) -> KeyBindings:
         keys = KeyBindings()
-        navigating = Condition(lambda: not self.filter_mode)
+        navigating = Condition(lambda: not self.filter_mode and self.view != "terminal")
         terminal_active = Condition(lambda: self.view == "terminal" and not self.picker_open)
+        terminal_input_active = Condition(
+            lambda: self.view == "terminal" and not self.picker_open and self.focus == "terminal"
+        )
+        session_focus = Condition(
+            lambda: self.view == "terminal" and not self.picker_open and self.focus == "sessions"
+        )
         picker_active = Condition(lambda: self.picker_open)
 
         @keys.add("c-c", filter=Condition(lambda: self.view != "terminal"), eager=True)
@@ -1172,7 +1224,7 @@ class JumpServerTui:
             self._stop_embedded_sessions()
             event.app.exit(result=0)
 
-        @keys.add("c-c", filter=terminal_active, eager=True)
+        @keys.add("c-c", filter=terminal_input_active, eager=True)
         def _terminal_interrupt(event: Any) -> None:
             self._send_terminal(b"\x03")
 
@@ -1185,7 +1237,10 @@ class JumpServerTui:
             if self.picker_open:
                 self._close_picker(cancel_transfer=True)
             elif self.view == "terminal":
-                self._send_terminal(b"\x04")
+                if self.focus == "sessions":
+                    self._leave_session_search()
+                else:
+                    self._send_terminal(b"\x04")
             elif self.filter_mode:
                 self.filter_mode = False
                 self._focus_navigation()
@@ -1203,7 +1258,13 @@ class JumpServerTui:
         @keys.add("tab", eager=True)
         def _tab(event: Any) -> None:
             if self.view == "terminal":
-                self._send_terminal(b"\t")
+                if len(self.embedded_sessions) > 1:
+                    if self.focus == "sessions":
+                        self._focus_terminal()
+                    else:
+                        self._focus_sessions()
+                else:
+                    self._send_terminal(b"\t")
             elif not self.picker_open:
                 self._toggle_focus()
 
@@ -1218,6 +1279,10 @@ class JumpServerTui:
         @keys.add("f2", filter=terminal_active, eager=True)
         def _next_session(event: Any) -> None:
             self._switch_session(1)
+
+        @keys.add("f6", filter=terminal_active, eager=True)
+        def _focus_session_list(event: Any) -> None:
+            self._focus_sessions()
 
         @keys.add("f3", filter=terminal_active, eager=True)
         def _split_session(event: Any) -> None:
@@ -1246,6 +1311,26 @@ class JumpServerTui:
         def _up(event: Any) -> None:
             self._move(-1)
 
+        @keys.add("up", filter=session_focus, eager=True)
+        def _session_up(event: Any) -> None:
+            self._move_session(-1)
+
+        @keys.add("down", filter=session_focus, eager=True)
+        def _session_down(event: Any) -> None:
+            self._move_session(1)
+
+        @keys.add("enter", filter=session_focus, eager=True)
+        def _session_enter(event: Any) -> None:
+            self._leave_session_search()
+
+        @keys.add("backspace", filter=session_focus, eager=True)
+        def _session_backspace(event: Any) -> None:
+            self._session_search(self.session_search_query[:-1])
+
+        @keys.add("c-u", filter=session_focus, eager=True)
+        def _session_clear(event: Any) -> None:
+            self._session_search("")
+
         @keys.add("up", filter=Condition(lambda: self.filter_mode), eager=True)
         def _search_up(event: Any) -> None:
             self._move(-1)
@@ -1266,8 +1351,10 @@ class JumpServerTui:
         def _enter(event: Any) -> None:
             if self.picker_open:
                 self._picker_confirm()
-            elif self.view == "terminal":
+            elif self.view == "terminal" and self.focus == "terminal":
                 self._send_terminal(b"\r")
+            elif self.view == "terminal" and self.focus == "sessions":
+                self._leave_session_search()
             elif self.filter_mode:
                 self.filter_mode = False
                 self._focus_navigation()
@@ -1277,41 +1364,43 @@ class JumpServerTui:
 
         @keys.add("c-u", eager=True)
         def _clear(event: Any) -> None:
-            if self.view == "terminal":
+            if self.view == "terminal" and self.focus == "terminal":
                 self._send_terminal(b"\x15")
+            elif self.view == "terminal" and self.focus == "sessions":
+                self._session_search("")
             elif self.filter_mode:
                 self.search_input.buffer.text = ""
                 self._invalidate()
 
-        @keys.add("c-y", filter=terminal_active, eager=True)
+        @keys.add("c-y", filter=terminal_input_active, eager=True)
         def _copy_selection(event: Any) -> None:
             self._copy_terminal_selection()
 
-        @keys.add("c-insert", filter=terminal_active, eager=True)
+        @keys.add("c-insert", filter=terminal_input_active, eager=True)
         def _copy_selection_insert(event: Any) -> None:
             self._copy_terminal_selection()
 
-        @keys.add("up", filter=terminal_active, eager=True)
+        @keys.add("up", filter=terminal_input_active, eager=True)
         def _terminal_up(event: Any) -> None:
             self._send_terminal(b"\x1b[A")
 
-        @keys.add("down", filter=terminal_active, eager=True)
+        @keys.add("down", filter=terminal_input_active, eager=True)
         def _terminal_down(event: Any) -> None:
             self._send_terminal(b"\x1b[B")
 
-        @keys.add("left", filter=terminal_active, eager=True)
+        @keys.add("left", filter=terminal_input_active, eager=True)
         def _terminal_left(event: Any) -> None:
             self._send_terminal(b"\x1b[D")
 
-        @keys.add("right", filter=terminal_active, eager=True)
+        @keys.add("right", filter=terminal_input_active, eager=True)
         def _terminal_right(event: Any) -> None:
             self._send_terminal(b"\x1b[C")
 
-        @keys.add("backspace", filter=terminal_active, eager=True)
+        @keys.add("backspace", filter=terminal_input_active, eager=True)
         def _terminal_backspace(event: Any) -> None:
             self._send_terminal(b"\x7f")
 
-        @keys.add("<any>", filter=terminal_active, eager=True)
+        @keys.add("<any>", filter=terminal_input_active)
         def _terminal_any(event: Any) -> None:
             # prompt-toolkit also delivers responses generated by the outer
             # terminal (CPR and SGR mouse reports).  They belong to the TUI,
@@ -1329,6 +1418,15 @@ class JumpServerTui:
             data = event.data
             if len(data) == 1 and data.isprintable():
                 self._send_terminal(data.encode("utf-8"))
+
+        session_typing = Condition(
+            lambda: self.view == "terminal" and not self.picker_open and self.focus == "sessions"
+        )
+        for char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-:@/":
+
+            @keys.add(char, filter=session_typing, eager=True)
+            def _session_type(event: Any, value: str = char) -> None:
+                self._session_search(self.session_search_query + value)
 
         @keys.add("q", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and not self.picker_open), eager=True)
         def _quit_key(event: Any) -> None:
