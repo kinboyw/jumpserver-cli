@@ -79,6 +79,19 @@ class TuiLogicTests(unittest.TestCase):
         self.assertEqual("".join(text for _, text in fragments), "abCde")
         self.assertTrue(any("#00aa00" in style and text == "C" for style, text in fragments))
 
+    def test_selection_reads_from_the_session_where_it_started(self):
+        class FakeSession:
+            def display_snapshot(self):
+                return ("first pane", "selected text")
+
+        tui = JumpServerTui.__new__(JumpServerTui)
+        tui.terminal_selection_anchor = (1, 0)
+        tui.terminal_selection_end = (1, 8)
+        tui.terminal_selection_session = FakeSession()
+        tui.embedded_session = None
+
+        self.assertEqual(tui._terminal_selection_text(), "selected")
+
     def test_termination_marks_session_before_stop(self):
         class FakeSession:
             alive = True

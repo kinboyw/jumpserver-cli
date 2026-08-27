@@ -258,6 +258,7 @@ class JumpServerTui:
         self._clipboard_owned = False
         self.terminal_selection_anchor: tuple[int, int] | None = None
         self.terminal_selection_end: tuple[int, int] | None = None
+        self.terminal_selection_session: EmbeddedPtySession | None = None
         self.terminal_selecting = False
         self.picker_session: EmbeddedPtySession | None = None
         self.picker_open = False
@@ -869,7 +870,7 @@ class JumpServerTui:
 
     def _terminal_selection_text(self) -> str:
         bounds = self._terminal_selection_bounds()
-        session = self.embedded_session
+        session = self.terminal_selection_session or self.embedded_session
         if bounds is None or session is None:
             return ""
         (start_y, start_x), (end_y, end_x) = bounds
@@ -1007,7 +1008,22 @@ class JumpServerTui:
             if self.embedded_session is not None:
                 self.embedded_session.scroll_history(1)
             return
-        point = (max(0, event.position.y), max(0, event.position.x))
+        point_x = max(0, event.position.x)
+        if self.split_mode and len(self._visible_sessions()) >= 2:
+            visible = self._visible_sessions()[:2]
+            dimensions = self._terminal_dimensions()
+            pane_width = max(20, ((dimensions[0] if dimensions else 120) - 3) // 2)
+            pane_index = 1 if point_x > pane_width else 0
+            pane_index = min(pane_index, len(visible) - 1)
+            pane_session = visible[pane_index]
+            point_x = max(0, point_x - (pane_width + 3 if pane_index else 0))
+            if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+                if pane_session is not self.embedded_session:
+                    self._switch_session_to(self.embedded_sessions.index(pane_session))
+                self.terminal_selection_session = pane_session
+        elif event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+            self.terminal_selection_session = self.embedded_session
+        point = (max(0, event.position.y), point_x)
         if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
             self.terminal_selection_anchor = point
             self.terminal_selection_end = point
@@ -2103,6 +2119,7 @@ class JumpServerTui:
         self.focus = "assets"
         self.terminal_selection_anchor = None
         self.terminal_selection_end = None
+        self.terminal_selection_session = None
         self.status = f"Select an asset for a new SSH session ({len(self.embedded_sessions)} open)"
         self._focus_navigation()
         self._invalidate()
@@ -2144,6 +2161,7 @@ class JumpServerTui:
         self.view = "terminal"
         self.terminal_selection_anchor = None
         self.terminal_selection_end = None
+        self.terminal_selection_session = None
         self.status = f"Opening SSH: {asset_ip(asset)}"
         holder: dict[str, EmbeddedPtySession] = {}
         dimensions = self._terminal_dimensions() or (120, 40)
@@ -2226,6 +2244,7 @@ class JumpServerTui:
             self.view = "terminal"
             self.terminal_selection_anchor = None
             self.terminal_selection_end = None
+            self.terminal_selection_session = None
             self.status = f"Authenticating: {asset_ip(asset)}"
             self._invalidate()
 
