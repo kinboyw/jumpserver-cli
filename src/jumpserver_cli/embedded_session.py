@@ -140,50 +140,27 @@ class EmbeddedPtySession:
     def display_snapshot(self) -> tuple[str, ...]:
         """Return a consistent screen image for the prompt-toolkit renderer."""
         with self._lock:
-            return tuple(self.screen.display)
+            lines = list(self.screen.display)
+            title = self.screen.title
+            if title:
+                lines = [line[len(title) :] if line.startswith(title) else line for line in lines]
+            return tuple(lines)
 
     def cursor_snapshot(self) -> tuple[int, int, bool]:
         with self._lock:
-            return self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
-
-    def styled_snapshot(self) -> tuple[tuple[tuple[str, tuple[Any, ...]], ...], ...]:
-        """Return screen characters together with their pyte attributes."""
-        with self._lock:
-            rows = []
-            for row in range(self.screen.lines):
-                chars = []
-                for column in range(self.screen.columns):
-                    char = self.screen.buffer[row][column]
-                    chars.append(
-                        (
-                            char.data,
-                            (
-                                char.fg,
-                                char.bg,
-                                char.bold,
-                                char.italics,
-                                char.underscore,
-                                char.strikethrough,
-                                char.reverse,
-                                char.blink,
-                            ),
-                        )
-                    )
-                rows.append(tuple(chars))
-            return tuple(rows)
-
-    def scroll_history(self, direction: int) -> None:
-        with self._lock:
-            if direction < 0:
-                self.screen.prev_page()
-            elif direction > 0:
-                self.screen.next_page()
-        self.on_change()
+            x, y, hidden = self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
+            title = self.screen.title
+            if title and 0 <= y < self.screen.lines:
+                line = self.screen.display[y]
+                if line.startswith(title):
+                    x = max(0, x - len(title))
+            return x, y, hidden
 
     def styled_snapshot(self) -> tuple[tuple[tuple[str, tuple[Any, ...]], ...], ...]:
         """Return character data and terminal attributes as one render snapshot."""
         with self._lock:
             rows = []
+            title = self.screen.title
             for row in range(self.screen.lines):
                 chars = []
                 for column in range(self.screen.columns):
@@ -199,6 +176,8 @@ class EmbeddedPtySession:
                         char.blink,
                     )
                     chars.append((char.data, attrs))
+                if title and "".join(char for char, _ in chars).startswith(title):
+                    chars = chars[len(title) :]
                 rows.append(tuple(chars))
             return tuple(rows)
 
