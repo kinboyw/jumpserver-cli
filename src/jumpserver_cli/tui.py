@@ -219,6 +219,7 @@ class JumpServerTui:
         self.session_search_query = ""
         self.view = "assets"
         self.asset_index = 0
+        self._last_asset_click: tuple[int, float] | None = None
         self.selected_asset_ids: set[str] = set()
         self.user_index = 0
         self.history_index = 0
@@ -233,6 +234,9 @@ class JumpServerTui:
         self.terminal_command_prefix = False
         self.context_menu_open = False
         self.context_menu_index = 0
+        self.session_menu_open = False
+        self.session_menu_index = 0
+        self.session_menu_target: EmbeddedPtySession | None = None
         self._clipboard_owned = False
         self.terminal_selection_anchor: tuple[int, int] | None = None
         self.terminal_selection_end: tuple[int, int] | None = None
@@ -297,6 +301,25 @@ class JumpServerTui:
             top=4,
             left=8,
             width=28,
+            height=5,
+        )
+        self.session_menu_control = MouseTextControl(
+            self._session_menu_text,
+            self._session_menu_mouse_handler,
+            lambda: Point(x=0, y=self.session_menu_index),
+        )
+        self.session_menu_float = Float(
+            content=ConditionalContainer(
+                Frame(
+                    Window(content=self.session_menu_control, wrap_lines=False),
+                    title=" SESSION ",
+                    style="class:popup",
+                ),
+                filter=Condition(lambda: self.session_menu_open),
+            ),
+            top=4,
+            left=4,
+            width=32,
             height=5,
         )
         self.terminal_window = Window(content=self.terminal_control, wrap_lines=False)
@@ -413,6 +436,7 @@ class JumpServerTui:
                     height=22,
                 ),
                 self.context_menu_float,
+                self.session_menu_float,
             ],
         )
 
@@ -503,11 +527,83 @@ class JumpServerTui:
         if event.event_type == MouseEventType.SCROLL_DOWN:
             self._switch_session(1)
             return
+        if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.RIGHT:
+            index = event.position.y - 1
+            if 0 <= index < len(self.embedded_sessions):
+                self.session_menu_target = self.embedded_sessions[index]
+                self.session_menu_index = 0
+                self.session_menu_open = True
+                try:
+                    size = get_app().output.get_size()
+                    self.session_menu_float.left = min(max(0, event.position.x + 1), max(0, size.columns - 33))
+                    self.session_menu_float.top = min(max(2, event.position.y + 2), max(2, size.rows - 6))
+                except Exception:
+                    self.session_menu_float.left = max(0, event.position.x + 1)
+                    self.session_menu_float.top = max(2, event.position.y + 2)
+                self._invalidate()
+            return
         if event.event_type != MouseEventType.MOUSE_DOWN or event.button != MouseButton.LEFT:
             return
         index = event.position.y - 1
         if 0 <= index < len(self.embedded_sessions):
             self._switch_session_to(index)
+
+    def _session_menu_text(self) -> FormattedText:
+        items = ("Terminate session", "Terminate all sessions", "Close menu")
+        rows: FormattedText = []
+        for index, item in enumerate(items):
+            style = "class:item.selected" if index == self.session_menu_index else "class:item"
+            rows.append((style, f"  {item}\n"))
+        return rows
+
+    def _close_session_menu(self) -> None:
+        self.session_menu_open = False
+        self.session_menu_target = None
+        if self.view == "terminal" and len(self.embedded_sessions) > 1:
+            self._focus_sessions()
+        self._invalidate()
+
+    def _terminate_session(self, session: EmbeddedPtySession | None) -> None:
+        if session is None or session not in self.embedded_sessions:
+            return
+        if not session.alive:
+            return
+        session.connection_status = "terminating"
+        label = getattr(session, "asset_label", "SSH session")
+        self.status = f"Terminating {label}"
+        session.stop()
+        self._invalidate()
+
+    def _terminate_active_session(self) -> None:
+        self._terminate_session(self.embedded_session)
+
+    def _terminate_all_sessions(self) -> None:
+        sessions = list(self.embedded_sessions)
+        if not sessions:
+            return
+        self.status = f"Terminating {len(sessions)} SSH sessions"
+        for session in sessions:
+            self._terminate_session(session)
+
+    def _session_menu_activate(self) -> None:
+        if self.session_menu_index == 0:
+            self._terminate_session(self.session_menu_target)
+        elif self.session_menu_index == 1:
+            self._terminate_all_sessions()
+        self._close_session_menu()
+
+    def _session_menu_mouse_handler(self, event: MouseEvent) -> None:
+        if event.event_type == MouseEventType.SCROLL_UP:
+            self.session_menu_index = max(0, self.session_menu_index - 1)
+        elif event.event_type == MouseEventType.SCROLL_DOWN:
+            self.session_menu_index = min(2, self.session_menu_index + 1)
+        elif event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
+            index = event.position.y
+            if 0 <= index <= 2:
+                self.session_menu_index = index
+                self._session_menu_activate()
+                return
+        self._invalidate()
 
     def _focus_sessions(self) -> None:
         if len(self.embedded_sessions) <= 1:
@@ -1086,8 +1182,18 @@ class JumpServerTui:
         elif 0 <= index < len(self.filtered_assets):
             self.asset_index = index
             if MouseModifier.SHIFT in event.modifiers or 2 <= event.position.x <= 4:
+                self._last_asset_click = None
                 self._toggle_asset_selection()
                 return
+            now = time.monotonic()
+            previous = self._last_asset_click
+            self._last_asset_click = (index, now)
+            if previous is not None and previous[0] == index and now - previous[1] <= 0.45:
+                # prompt-toolkit exposes mouse presses rather than a
+                # platform-specific click count.  A short second press on
+                # the same host is therefore treated as a double click.
+                self._last_asset_click = None
+                self._select_asset()
         self._invalidate()
 
     def _history_mouse_handler(self, event: MouseEvent) -> None:
@@ -1214,6 +1320,9 @@ class JumpServerTui:
             if self.context_menu_open:
                 hint = "click action  Up/Down navigate  Enter select  Esc close"
                 return FormattedText([("class:item.muted", status + hint)])
+            if self.session_menu_open:
+                hint = "click action  Up/Down navigate  Enter select  Esc close"
+                return FormattedText([("class:item.muted", status + hint)])
             if self.terminal_command_prefix:
                 return FormattedText(
                     [
@@ -1236,7 +1345,7 @@ class JumpServerTui:
                     ("class:footer.key", "Ctrl-Insert"), ("class:item.muted", " copy selection  "),
                     ("class:footer.key", "Shift-Insert"), ("class:item.muted", " paste  "),
                     ("class:footer.key", "PgUp/PgDn"), ("class:item.muted", " scrollback  "),
-                    ("class:footer.key", "Ctrl-X"), ("class:item.muted", " r refresh  q quit  n resources  u/d transfer"),
+                    ("class:footer.key", "Ctrl-X"), ("class:item.muted", " r refresh  q quit  x terminate  n resources  u/d transfer"),
                 ]
             )
         if self.filter_mode:
@@ -1665,6 +1774,8 @@ class JumpServerTui:
         def _escape(event: Any) -> None:
             if self.picker_open:
                 self._close_picker(cancel_transfer=True)
+            elif self.session_menu_open:
+                self._close_session_menu()
             elif self.context_menu_open:
                 self._close_context_menu()
             elif self.view == "terminal":
@@ -1708,7 +1819,10 @@ class JumpServerTui:
         def _new_session(event: Any) -> None:
             self._toggle_terminal_navigation()
 
-        @keys.add("c-n", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and bool(self.embedded_sessions)), eager=True)
+        # Ctrl-N is also the return-to-session toggle while the asset filter
+        # is active.  The search widget must not swallow it after a query has
+        # been edited from the resource view.
+        @keys.add("c-n", filter=Condition(lambda: self.view != "terminal" and bool(self.embedded_sessions)), eager=True)
         def _return_session(event: Any) -> None:
             self._toggle_terminal_navigation()
 
@@ -1741,8 +1855,24 @@ class JumpServerTui:
                 self._send_terminal(b"\x18\x18")
             else:
                 self.terminal_command_prefix = True
-                self.status = "Command mode: r refresh  q quit  n resources  u/d transfer"
+                self.status = "Command mode: r refresh  q quit  x terminate  n resources  u/d transfer"
                 self._invalidate()
+
+        session_menu_active = Condition(lambda: self.session_menu_open)
+
+        @keys.add("up", filter=session_menu_active, eager=True)
+        def _session_menu_up(event: Any) -> None:
+            self.session_menu_index = max(0, self.session_menu_index - 1)
+            self._invalidate()
+
+        @keys.add("down", filter=session_menu_active, eager=True)
+        def _session_menu_down(event: Any) -> None:
+            self.session_menu_index = min(2, self.session_menu_index + 1)
+            self._invalidate()
+
+        @keys.add("enter", filter=session_menu_active, eager=True)
+        def _session_menu_enter(event: Any) -> None:
+            self._session_menu_activate()
 
         @keys.add("space", filter=picker_active, eager=True)
         def _picker_space(event: Any) -> None:
@@ -1923,6 +2053,12 @@ class JumpServerTui:
         def _command_refresh(event: Any) -> None:
             self.terminal_command_prefix = False
             self._reload()
+
+        @keys.add("x", filter=terminal_command_mode, eager=True)
+        @keys.add("X", filter=terminal_command_mode, eager=True)
+        def _command_terminate(event: Any) -> None:
+            self.terminal_command_prefix = False
+            self._terminate_active_session()
 
         @keys.add("q", filter=terminal_command_mode, eager=True)
         @keys.add("Q", filter=terminal_command_mode, eager=True)
