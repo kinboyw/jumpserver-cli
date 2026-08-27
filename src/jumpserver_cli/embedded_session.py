@@ -196,7 +196,12 @@ class EmbeddedPtySession:
         """
         title = self.screen.title
         if title and line.startswith(title):
-            return line[len(title):], len(title)
+            remainder = line[len(title):]
+            # Only strip an OSC title when it is immediately followed by the
+            # duplicated JumpServer prompt. A legitimate PS1 may start with
+            # the same user@host text and must remain fully visible.
+            if re.match(r"^\[[^\]]+@[^\]]+\]\s*[$#>%]", remainder):
+                return remainder, len(title)
         match = ECHOED_PROMPT.match(line)
         if match:
             return match.group(2), len(match.group(1))
