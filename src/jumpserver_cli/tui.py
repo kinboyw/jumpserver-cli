@@ -1239,6 +1239,7 @@ class JumpServerTui:
                     ("class:footer.key", "Up/Down"), ("class:item.muted", " navigate  "),
                     ("class:footer.key", "Enter"), ("class:item.muted", " connect  "),
                     ("class:footer.key", "Esc"), ("class:item.muted", " close filter  "),
+                    ("class:footer.key", "Ctrl-Space"), ("class:item.muted", " select  "),
                     ("class:footer.key", "Ctrl-Q/C"), ("class:item.muted", " quit"),
                 ]
             )
@@ -1978,6 +1979,10 @@ class JumpServerTui:
         @keys.add("c-a", filter=asset_typing, eager=True)
         def _select_all_assets(event: Any) -> None:
             self._toggle_all_asset_selection()
+
+        @keys.add("c-space", filter=Condition(lambda: self.filter_mode and self.view == "assets"), eager=True)
+        def _select_filtered_asset(event: Any) -> None:
+            self._toggle_asset_selection()
 
         return keys
 
