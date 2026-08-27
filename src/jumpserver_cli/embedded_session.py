@@ -34,11 +34,11 @@ ZMODEM_PREFIXES = tuple(
 )
 
 
-class SessionScreen(pyte.Screen):
+class SessionScreen(pyte.HistoryScreen):
     """pyte screen that can answer terminal queries from remote programs."""
 
     def __init__(self, columns: int, lines: int, send: Callable[[bytes], None]) -> None:
-        super().__init__(columns, lines)
+        super().__init__(columns, lines, history=2000, ratio=0.5)
         self._send = send
 
     def write_process_input(self, data: str) -> None:
@@ -145,6 +145,70 @@ class EmbeddedPtySession:
     def cursor_snapshot(self) -> tuple[int, int, bool]:
         with self._lock:
             return self.screen.cursor.x, self.screen.cursor.y, self.screen.cursor.hidden
+
+    def styled_snapshot(self) -> tuple[tuple[tuple[str, tuple[Any, ...]], ...], ...]:
+        """Return screen characters together with their pyte attributes."""
+        with self._lock:
+            rows = []
+            for row in range(self.screen.lines):
+                chars = []
+                for column in range(self.screen.columns):
+                    char = self.screen.buffer[row][column]
+                    chars.append(
+                        (
+                            char.data,
+                            (
+                                char.fg,
+                                char.bg,
+                                char.bold,
+                                char.italics,
+                                char.underscore,
+                                char.strikethrough,
+                                char.reverse,
+                                char.blink,
+                            ),
+                        )
+                    )
+                rows.append(tuple(chars))
+            return tuple(rows)
+
+    def scroll_history(self, direction: int) -> None:
+        with self._lock:
+            if direction < 0:
+                self.screen.prev_page()
+            elif direction > 0:
+                self.screen.next_page()
+        self.on_change()
+
+    def styled_snapshot(self) -> tuple[tuple[tuple[str, tuple[Any, ...]], ...], ...]:
+        """Return character data and terminal attributes as one render snapshot."""
+        with self._lock:
+            rows = []
+            for row in range(self.screen.lines):
+                chars = []
+                for column in range(self.screen.columns):
+                    char = self.screen.buffer[row][column]
+                    attrs = (
+                        char.fg,
+                        char.bg,
+                        char.bold,
+                        char.italics,
+                        char.underscore,
+                        char.strikethrough,
+                        char.reverse,
+                        char.blink,
+                    )
+                    chars.append((char.data, attrs))
+                rows.append(tuple(chars))
+            return tuple(rows)
+
+    def scroll_history(self, direction: int) -> None:
+        with self._lock:
+            if direction < 0:
+                self.screen.prev_page()
+            elif direction > 0:
+                self.screen.next_page()
+        self.on_change()
 
     def start_transfer(self, command: list[str], *, cwd: str | None = None) -> None:
         with self._lock:

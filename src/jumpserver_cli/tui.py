@@ -397,8 +397,11 @@ class JumpServerTui:
         if session is None:
             return FormattedText([("class:item.muted", "SSH session is not running")])
         rows: FormattedText = []
-        for row, line in enumerate(session.display_snapshot()):
-            rows.extend(self._terminal_render_line(row, line))
+        lines = session.display_snapshot()
+        styled = session.styled_snapshot()
+        for row, line in enumerate(lines):
+            attrs = styled[row] if row < len(styled) else ()
+            rows.extend(self._terminal_render_line(row, line, attrs))
             rows.append(("class:terminal", "\n"))
         return rows
 
@@ -533,7 +536,12 @@ class JumpServerTui:
             row == end_y and row != start_y and column < end_x
         )
 
-    def _terminal_render_line(self, row: int, line: str) -> list[tuple[str, str]]:
+    def _terminal_render_line(
+        self,
+        row: int,
+        line: str,
+        attrs: tuple[tuple[str, tuple[Any, ...]], ...] = (),
+    ) -> list[tuple[str, str]]:
         fragments: list[tuple[str, str]] = []
         if not line:
             return [("class:terminal", "")]
@@ -546,15 +554,60 @@ class JumpServerTui:
         for column in range(1, len(line) + 1):
             current = column < len(line) and self._terminal_is_selected(row, column)
             current_cursor = cursor_visible and not cursor_hidden and row == cursor_y and column == cursor_x
-            if current != selected or current_cursor != cursor:
-                style = "class:terminal.cursor" if cursor else "class:terminal.selected" if selected else "class:terminal"
+            char_style = self._terminal_char_style(attrs, begin)
+            next_style = self._terminal_char_style(attrs, column)
+            if current != selected or current_cursor != cursor or char_style != next_style:
+                style = self._terminal_display_style(char_style, selected, cursor)
                 fragments.append((style, line[begin:column]))
                 begin = column
                 selected = current
                 cursor = current_cursor
-        style = "class:terminal.cursor" if cursor else "class:terminal.selected" if selected else "class:terminal"
+        style = self._terminal_display_style(
+            self._terminal_char_style(attrs, begin), selected, cursor
+        )
         fragments.append((style, line[begin:]))
         return fragments
+
+    @staticmethod
+    def _terminal_char_style(
+        attrs: tuple[tuple[str, tuple[Any, ...]], ...], column: int
+    ) -> str:
+        if column >= len(attrs):
+            return "class:terminal"
+        _, values = attrs[column]
+        fg, bg, bold, italics, underscore, strikethrough, reverse, blink = values
+        if reverse:
+            fg, bg = bg, fg
+
+        def color(value: str) -> str | None:
+            if value == "default":
+                return None
+            return f"#{value}" if len(value) == 6 and all(char in "0123456789abcdefABCDEF" for char in value) else value
+
+        parts = ["class:terminal"]
+        if color(fg):
+            parts.append(f"fg:{color(fg)}")
+        if color(bg):
+            parts.append(f"bg:{color(bg)}")
+        if bold:
+            parts.append("bold")
+        if italics:
+            parts.append("italic")
+        if underscore:
+            parts.append("underline")
+        if strikethrough:
+            parts.append("strike")
+        if blink:
+            parts.append("blink")
+        return " ".join(parts)
+
+    @staticmethod
+    def _terminal_display_style(base: str, selected: bool, cursor: bool) -> str:
+        if cursor:
+            return "class:terminal.cursor"
+        if selected:
+            return f"{base} bg:#264f78"
+        return base
 
     @staticmethod
     def _cursor_blink_visible() -> bool:
@@ -562,8 +615,12 @@ class JumpServerTui:
 
     def _terminal_mouse_handler(self, event: MouseEvent) -> None:
         if event.event_type == MouseEventType.SCROLL_UP:
+            if self.embedded_session is not None:
+                self.embedded_session.scroll_history(-1)
             return
         if event.event_type == MouseEventType.SCROLL_DOWN:
+            if self.embedded_session is not None:
+                self.embedded_session.scroll_history(1)
             return
         point = (max(0, event.position.y), max(0, event.position.x))
         if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
@@ -1006,6 +1063,7 @@ class JumpServerTui:
                     ("class:footer.key", "F4/Ctrl-N"), ("class:item.muted", " resources  "),
                     ("class:footer.key", "F6/Tab"), ("class:item.muted", " focus sessions  "),
                     ("class:footer.key", "Ctrl-Y"), ("class:item.muted", " copy selection  "),
+                    ("class:footer.key", "PgUp/PgDn"), ("class:item.muted", " scrollback  "),
                     ("class:footer.key", "Ctrl-X U/D"), ("class:item.muted", " ZMODEM"),
                 ]
             )
@@ -1351,9 +1409,8 @@ class JumpServerTui:
             elif self.view == "users":
                 self.view = "assets"
                 self.users = []
-            elif self.view == "assets" and self.embedded_sessions:
-                self.view = "terminal"
-                self._focus_terminal()
+            elif self.view == "assets":
+                self.status = "Press q to quit"
             else:
                 self._stop_embedded_sessions()
                 event.app.exit(result=0)
@@ -1510,6 +1567,16 @@ class JumpServerTui:
         def _terminal_up(event: Any) -> None:
             self._send_terminal(b"\x1b[A")
 
+        @keys.add("pageup", filter=terminal_input_active, eager=True)
+        def _terminal_pageup(event: Any) -> None:
+            if self.embedded_session is not None:
+                self.embedded_session.scroll_history(-1)
+
+        @keys.add("pagedown", filter=terminal_input_active, eager=True)
+        def _terminal_pagedown(event: Any) -> None:
+            if self.embedded_session is not None:
+                self.embedded_session.scroll_history(1)
+
         @keys.add("down", filter=terminal_input_active, eager=True)
         def _terminal_down(event: Any) -> None:
             self._send_terminal(b"\x1b[B")
@@ -1559,7 +1626,7 @@ class JumpServerTui:
             self._stop_embedded_sessions()
             event.app.exit(result=0)
 
-        @keys.add("r", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and self.focus != "assets"), eager=True)
+        @keys.add("r", filter=Condition(lambda: self.view != "terminal" and not self.filter_mode and not self.picker_open), eager=True)
         def _reload(event: Any) -> None:
             self._reload()
 
