@@ -32,7 +32,7 @@ from prompt_toolkit.layout import ConditionalContainer, Float, FloatContainer, H
 from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.widgets import Frame, TextArea
 
 from .cli import (
     DEFAULT_BASE_URL,
@@ -53,8 +53,12 @@ from .embedded_session import EmbeddedPtySession
 
 # Some WSL terminal frontends emit these xterm modifier sequences directly.
 # Without explicit mappings, their trailing ``5~`` can reach the remote shell.
-ANSI_SEQUENCES.setdefault("\x1b[2;2~", Keys.ShiftInsert)
-ANSI_SEQUENCES.setdefault("\x1b[2;5~", Keys.ControlInsert)
+ANSI_SEQUENCES["\x1b[2;2~"] = Keys.ShiftInsert
+ANSI_SEQUENCES["\x1b[2;5~"] = Keys.ControlInsert
+ANSI_SEQUENCES["\x1b[2;4~"] = Keys.ShiftInsert
+ANSI_SEQUENCES["\x1b[2;7~"] = Keys.ControlInsert
+ANSI_SEQUENCES["\x1b[27;2;2~"] = Keys.ShiftInsert
+ANSI_SEQUENCES["\x1b[27;5;2~"] = Keys.ControlInsert
 
 
 HISTORY_PATH = Path.home() / ".local" / "state" / "jumpserver-cli" / "history.json"
@@ -71,6 +75,7 @@ STYLE = Style.from_dict(
         "footer.key": "bg:#010409 #f0f6fc bold",
         "footer.search": "bg:#010409 #ffa657 bold",
         "frame": "#30363d",
+        "popup": "bg:#161b22 #c9d1d9",
         "frame.title": "#8b949e bold",
         "frame.focused": "#58a6ff bold",
         "item": "#c9d1d9",
@@ -218,6 +223,7 @@ class JumpServerTui:
         self.terminal_command_prefix = False
         self.context_menu_open = False
         self.context_menu_index = 0
+        self._clipboard_owned = False
         self.terminal_selection_anchor: tuple[int, int] | None = None
         self.terminal_selection_end: tuple[int, int] | None = None
         self.terminal_selecting = False
@@ -268,6 +274,20 @@ class JumpServerTui:
             self._context_menu_text,
             self._context_menu_mouse_handler,
             lambda: Point(x=0, y=self.context_menu_index),
+        )
+        self.context_menu_float = Float(
+            content=ConditionalContainer(
+                Frame(
+                    Window(content=self.context_menu_control, wrap_lines=False),
+                    title=" ACTIONS ",
+                    style="class:popup",
+                ),
+                filter=Condition(lambda: self.context_menu_open),
+            ),
+            top=4,
+            left=8,
+            width=28,
+            height=5,
         )
         self.terminal_window = Window(content=self.terminal_control, wrap_lines=False)
         self.picker_path_input = TextArea(
@@ -372,22 +392,17 @@ class JumpServerTui:
             content=base,
             floats=[
                 Float(
-                    content=ConditionalContainer(self.picker_window, filter=Condition(lambda: self.picker_open)),
-                    top=3,
-                    left=8,
+                    content=ConditionalContainer(
+                        Frame(self.picker_window, title=" FILE TRANSFER ", style="class:popup"),
+                        filter=Condition(lambda: self.picker_open),
+                    ),
+                    xcursor=True,
+                    ycursor=True,
+                    attach_to_window=self.terminal_window,
                     width=88,
                     height=22,
                 ),
-                Float(
-                    content=ConditionalContainer(
-                        Window(content=self.context_menu_control, wrap_lines=False),
-                        filter=Condition(lambda: self.context_menu_open),
-                    ),
-                    top=4,
-                    left=8,
-                    width=28,
-                    height=4,
-                ),
+                self.context_menu_float,
             ],
         )
 
@@ -661,8 +676,17 @@ class JumpServerTui:
         if event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.RIGHT:
             self.context_menu_open = True
             self.context_menu_index = 0
+            try:
+                size = get_app().output.get_size()
+                self.context_menu_float.left = min(max(0, event.position.x + 1), max(0, size.columns - 29))
+                self.context_menu_float.top = min(max(2, event.position.y + 2), max(2, size.rows - 6))
+            except Exception:
+                self.context_menu_float.left = max(0, event.position.x + 1)
+                self.context_menu_float.top = max(2, event.position.y + 2)
             self._invalidate()
             return
+        if self.context_menu_open and event.event_type == MouseEventType.MOUSE_DOWN:
+            self._close_context_menu()
         if event.event_type == MouseEventType.SCROLL_UP:
             if self.embedded_session is not None:
                 self.embedded_session.scroll_history(-1)
@@ -688,7 +712,7 @@ class JumpServerTui:
 
     def _context_menu_text(self) -> FormattedText:
         items = ("Copy selection", "Paste clipboard", "Close menu")
-        rows: FormattedText = [("class:frame.focused", " ACTIONS\n")]
+        rows: FormattedText = []
         for index, item in enumerate(items):
             style = "class:item.selected" if index == self.context_menu_index else "class:item"
             rows.append((style, f"  {item}\n"))
@@ -712,7 +736,7 @@ class JumpServerTui:
         elif event.event_type == MouseEventType.SCROLL_DOWN:
             self.context_menu_index = min(2, self.context_menu_index + 1)
         elif event.event_type == MouseEventType.MOUSE_DOWN and event.button == MouseButton.LEFT:
-            index = event.position.y - 1
+            index = event.position.y
             if 0 <= index <= 2:
                 self.context_menu_index = index
                 self._context_menu_activate()
@@ -725,6 +749,7 @@ class JumpServerTui:
             return
         with __import__("contextlib").suppress(Exception):
             get_app().clipboard.set_data(ClipboardData(text))
+            self._clipboard_owned = True
         copied = False
         encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
         powershell_script = (
@@ -740,7 +765,7 @@ class JumpServerTui:
             ("pbcopy",),
         ):
             try:
-                subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1)
+                subprocess.run(command, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=0.35)
             except (FileNotFoundError, OSError, subprocess.SubprocessError):
                 continue
             copied = True
@@ -777,10 +802,12 @@ class JumpServerTui:
         # In WSL, prompt-toolkit's in-memory clipboard is not necessarily the
         # same clipboard as Windows. Read the host clipboard first, then use
         # the TUI clipboard as a fallback for native Linux/macOS terminals.
-        text = self._read_system_clipboard()
-        if not text:
+        text = ""
+        if self._clipboard_owned:
             with __import__("contextlib").suppress(Exception):
                 text = get_app().clipboard.get_data().text
+        if not text:
+            text = self._read_system_clipboard()
         if text:
             self._send_terminal(text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8"))
 
@@ -805,7 +832,7 @@ class JumpServerTui:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     check=True,
-                    timeout=1,
+                    timeout=0.35,
                 )
             except (FileNotFoundError, OSError, subprocess.SubprocessError):
                 continue
@@ -1157,6 +1184,23 @@ class JumpServerTui:
         else:
             status = "  "
         if self.view == "terminal":
+            if self.picker_open:
+                hint = "click file/dir  Space select  Enter transfer  Esc cancel"
+                return FormattedText([("class:item.muted", status + hint)])
+            if self.context_menu_open:
+                hint = "click action  Up/Down navigate  Enter select  Esc close"
+                return FormattedText([("class:item.muted", status + hint)])
+            if self.terminal_command_prefix:
+                return FormattedText(
+                    [
+                        ("class:item.muted", status),
+                        ("class:footer.key", "r"), ("class:item.muted", " refresh  "),
+                        ("class:footer.key", "q"), ("class:item.muted", " quit  "),
+                        ("class:footer.key", "n"), ("class:item.muted", " resources  "),
+                        ("class:footer.key", "u/d"), ("class:item.muted", " transfer  "),
+                        ("class:footer.key", "Esc"), ("class:item.muted", " cancel"),
+                    ]
+                )
             return FormattedText(
                 [
                     ("class:item.muted", status),
