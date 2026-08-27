@@ -208,6 +208,7 @@ class JumpServerTui:
         self.embedded_session: EmbeddedPtySession | None = None
         self.active_session_index = 0
         self.split_mode = False
+        self.terminal_command_prefix = False
         self.terminal_selection_anchor: tuple[int, int] | None = None
         self.terminal_selection_end: tuple[int, int] | None = None
         self.terminal_selecting = False
@@ -1104,7 +1105,7 @@ class JumpServerTui:
                     ("class:footer.key", "F6/Tab"), ("class:item.muted", " focus sessions  "),
                     ("class:footer.key", "Ctrl-Y"), ("class:item.muted", " copy selection  "),
                     ("class:footer.key", "PgUp/PgDn"), ("class:item.muted", " scrollback  "),
-                    ("class:footer.key", "Ctrl-X U/D"), ("class:item.muted", " ZMODEM"),
+                    ("class:footer.key", "Ctrl-X"), ("class:item.muted", " r refresh  q quit  n resources  u/d transfer"),
                 ]
             )
         return FormattedText(
@@ -1415,14 +1416,6 @@ class JumpServerTui:
             self._stop_embedded_sessions()
             event.app.exit(result=0)
 
-        @keys.add("c-c", filter=terminal_input_active, eager=True)
-        def _terminal_copy(event: Any) -> None:
-            if self._terminal_selection_text():
-                self._copy_terminal_selection()
-            else:
-                self.status = "No terminal selection"
-                self._invalidate()
-
         @keys.add("c-c", filter=picker_active, eager=True)
         def _picker_cancel(event: Any) -> None:
             self._close_picker(cancel_transfer=True)
@@ -1432,17 +1425,16 @@ class JumpServerTui:
             if self.picker_open:
                 self._close_picker(cancel_transfer=True)
             elif self.view == "terminal":
-                if self.focus == "sessions":
+                if self.terminal_command_prefix:
+                    self.terminal_command_prefix = False
+                    self.status = "Command mode cancelled"
+                elif self.focus == "sessions":
                     self._leave_session_search()
                 else:
-                    self.view = "assets"
-                    self.users = []
-                    self.user_index = 0
-                    self.focus = "assets"
-                    self.terminal_selection_anchor = None
-                    self.terminal_selection_end = None
-                    self.status = "SSH session kept alive"
-                    self._focus_navigation()
+                    # Esc belongs to the remote terminal (for example, Vim
+                    # uses it to leave insert mode). Use Ctrl-X for TUI
+                    # commands so a shell application cannot be interrupted.
+                    self._send_terminal(b"\x1b")
             elif self.filter_mode:
                 self.filter_mode = False
                 self._focus_navigation()
@@ -1488,6 +1480,22 @@ class JumpServerTui:
         @keys.add("f3", filter=terminal_active, eager=True)
         def _split_session(event: Any) -> None:
             self._toggle_split()
+
+        terminal_command_mode = Condition(
+            lambda: self.view == "terminal"
+            and not self.picker_open
+            and self.terminal_command_prefix
+        )
+
+        @keys.add("c-x", filter=terminal_active, eager=True)
+        def _terminal_command_prefix(event: Any) -> None:
+            if self.terminal_command_prefix:
+                self.terminal_command_prefix = False
+                self._send_terminal(b"\x18\x18")
+            else:
+                self.terminal_command_prefix = True
+                self.status = "Command mode: r refresh  q quit  n resources  u/d transfer"
+                self._invalidate()
 
         @keys.add("space", filter=picker_active, eager=True)
         def _picker_space(event: Any) -> None:
@@ -1593,7 +1601,7 @@ class JumpServerTui:
         def _terminal_clear(event: Any) -> None:
             self._send_terminal(b"\x0c")
 
-        handled_controls = {"c-c", "c-v", "c-w", "c-l", "c-u", "c-n", "c-y"}
+        handled_controls = {"c-v", "c-w", "c-l", "c-u", "c-n", "c-y"}
         for letter in "abcdefghijklmnopqrstuvwxyz":
             key_name = f"c-{letter}"
             if key_name in handled_controls:
@@ -1641,7 +1649,43 @@ class JumpServerTui:
 
             @keys.add(char, filter=terminal_input_active, eager=True)
             def _terminal_printable(event: Any, value: str = char) -> None:
-                self._send_terminal(value.encode("utf-8"))
+                if self.terminal_command_prefix:
+                    self.terminal_command_prefix = False
+                    self.status = ""
+                    self._send_terminal(b"\x18" + value.encode("utf-8"))
+                else:
+                    self._send_terminal(value.encode("utf-8"))
+
+        @keys.add("r", filter=terminal_command_mode, eager=True)
+        @keys.add("R", filter=terminal_command_mode, eager=True)
+        def _command_refresh(event: Any) -> None:
+            self.terminal_command_prefix = False
+            self._reload()
+
+        @keys.add("q", filter=terminal_command_mode, eager=True)
+        @keys.add("Q", filter=terminal_command_mode, eager=True)
+        def _command_quit(event: Any) -> None:
+            self.terminal_command_prefix = False
+            self._stop_embedded_sessions()
+            event.app.exit(result=0)
+
+        @keys.add("n", filter=terminal_command_mode, eager=True)
+        @keys.add("N", filter=terminal_command_mode, eager=True)
+        def _command_resources(event: Any) -> None:
+            self.terminal_command_prefix = False
+            self._open_new_session()
+
+        @keys.add("u", filter=terminal_command_mode, eager=True)
+        @keys.add("U", filter=terminal_command_mode, eager=True)
+        def _command_upload(event: Any) -> None:
+            self.terminal_command_prefix = False
+            self._open_picker("upload")
+
+        @keys.add("d", filter=terminal_command_mode, eager=True)
+        @keys.add("D", filter=terminal_command_mode, eager=True)
+        def _command_download(event: Any) -> None:
+            self.terminal_command_prefix = False
+            self._open_picker("download")
 
         @keys.add("<any>", filter=terminal_input_active)
         def _terminal_any(event: Any) -> None:
