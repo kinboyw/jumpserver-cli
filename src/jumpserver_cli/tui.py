@@ -228,6 +228,7 @@ class JumpServerTui:
         self._pending_user_assets: set[str] = set()
         self._pending_connection_keys: set[tuple[str, str]] = set()
         self._reload_pending = False
+        self._terminal_redraw_pending = False
         self.status = "Ready"
         self.last_error = ""
         self.embedded_sessions: list[EmbeddedPtySession] = []
@@ -1811,7 +1812,27 @@ class JumpServerTui:
     def _terminal_changed(self, session: EmbeddedPtySession) -> None:
         if getattr(session, "connection_status", "") == "connecting":
             session.connection_status = "connected"
-        self._from_session_thread(self._invalidate)
+        self._schedule_terminal_redraw()
+
+    def _schedule_terminal_redraw(self) -> None:
+        """Coalesce PTY output notifications so input stays responsive."""
+        loop = getattr(self.application, "loop", None)
+        if loop is None:
+            self._invalidate()
+            return
+
+        def schedule() -> None:
+            if self._terminal_redraw_pending:
+                return
+            self._terminal_redraw_pending = True
+
+            def redraw() -> None:
+                self._terminal_redraw_pending = False
+                self._invalidate()
+
+            loop.call_later(0.025, redraw)
+
+        loop.call_soon_threadsafe(schedule)
 
     def _terminal_zmodem(self, session: EmbeddedPtySession, direction: str) -> None:
         self._from_session_thread(lambda: self._open_picker(direction, session))

@@ -19,7 +19,8 @@ building the embedded SSH TUI. Read it before changing `tui.py` or
   build log can update the PTY between calls and produce half-lines or column
   shifts.
 - Avoid invalidating the application for every byte. Batch output is expected;
-  prompt-toolkit's redraw loop should remain the pacing mechanism.
+  coalesce PTY change notifications (the current implementation uses a short
+  redraw window) so prompt-toolkit's event loop leaves room for keyboard input.
 
 ## PTY and Terminal Semantics
 
