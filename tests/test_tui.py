@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pyte
 
 from jumpserver_cli.embedded_session import EmbeddedPtySession, SessionScreen
+from jumpserver_cli.pane_layout import PaneLayout, SplitNode
 from jumpserver_cli.tui import JumpServerTui, fuzzy_match
 
 
@@ -43,6 +44,30 @@ class EmbeddedScreenTests(unittest.TestCase):
 
 
 class TuiLogicTests(unittest.TestCase):
+    def test_pane_layout_opens_focuses_and_closes_nested_panes(self):
+        layout = PaneLayout()
+        layout.open("a")
+        layout.open("b", orientation="horizontal", ratio=0.7)
+        layout.open("c", target_key="a")
+
+        self.assertEqual(layout.keys, ["a", "c", "b"])
+        self.assertEqual(layout.active_key, "c")
+        self.assertIsInstance(layout.root, SplitNode)
+        self.assertTrue(layout.focus("b"))
+        self.assertEqual(layout.focus_next(), "a")
+        self.assertTrue(layout.close("c"))
+        self.assertEqual(layout.keys, ["a", "b"])
+
+    def test_pane_layout_clamps_ratios_and_rejects_unknown_paths(self):
+        layout = PaneLayout()
+        layout.open("a")
+        layout.open("b", ratio=0.99)
+
+        self.assertTrue(layout.set_ratio((), 0.01))
+        self.assertIsInstance(layout.root, SplitNode)
+        self.assertEqual(layout.root.ratio, 0.1)
+        self.assertFalse(layout.set_ratio((2,), 0.5))
+
     def test_filter_requires_each_term_to_match_ip_or_hostname(self):
         self.assertTrue(fuzzy_match("ott 10.0", "10.0.0.1", "ott-api"))
         self.assertFalse(fuzzy_match("ott 10.1", "10.0.0.1", "ott-api"))
