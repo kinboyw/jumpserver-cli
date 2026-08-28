@@ -22,6 +22,8 @@ TUI 预览：
 
 开发和维护 TUI 时，请先阅读 [TUI 开发注意事项](docs/tui-development.md)，其中记录了嵌入式 PTY、渲染性能、输入路由、PS1 清理、会话生命周期和已知回归的处理约束。
 
+后续 Pane 布局、分隔线拖拽、活动窗格和同步输入的设计见 [Pane 架构提案](docs/pane-architecture.md)。
+
 运行离线回归测试：
 
 ```bash
